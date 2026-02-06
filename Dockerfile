@@ -17,4 +17,4 @@ ENV GOOGLE_CLOUD_PROJECT=cp220-grading-assistant
 ENV PRODUCTION=1
 
 # Run the application
-CMD ["python", "api_server.py"]
+CMD ["python", "src/api_server.py"]
