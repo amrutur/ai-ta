@@ -1,6 +1,6 @@
 # SendGrid Email Setup Guide
 
-This guide explains how to configure SendGrid for sending email notifications from the CP220 Grading Assistant.
+This guide explains how to configure SendGrid for sending email notifications from the AI Teaching Assistant.
 
 ## Overview
 
@@ -16,7 +16,7 @@ The application uses SendGrid API to send email notifications when instructors n
 Check that the SendGrid API key is stored in Secret Manager:
 
 ```bash
-gcloud secrets describe sendgrid-api-key --project=cp220-grading-assistant
+gcloud secrets describe sendgrid-api-key --project=ai-ta
 ```
 
 If the secret doesn't exist, create it:
@@ -24,7 +24,7 @@ If the secret doesn't exist, create it:
 ```bash
 # Get your SendGrid API key from https://app.sendgrid.com/settings/api_keys
 echo -n "your-sendgrid-api-key" | gcloud secrets create sendgrid-api-key \
-  --project=cp220-grading-assistant \
+  --project=ai-ta \
   --data-file=-
 ```
 
@@ -38,7 +38,7 @@ SendGrid requires you to verify the email address you'll send from.
 2. Navigate to **Settings** > **Sender Authentication**
 3. Click **Verify a Single Sender**
 4. Fill in the form:
-   - **From Name**: CP220 Grading Assistant
+   - **From Name**: AI Teaching Assistant
    - **From Email Address**: noreply@yourdomain.com (or your preferred email)
    - Fill in other required fields
 5. Click **Create**
@@ -63,7 +63,7 @@ export SENDGRID_FROM_EMAIL="noreply@yourdomain.com"
 
 ### For Production (Cloud Run):
 ```bash
-gcloud run services update cp220-grader-api \
+gcloud run services update ai-ta-api \
   --update-env-vars SENDGRID_FROM_EMAIL="noreply@yourdomain.com" \
   --region us-east1
 ```
@@ -73,7 +73,7 @@ gcloud run services update cp220-grader-api \
 After deployment, check the logs:
 
 ```bash
-gcloud run services logs read cp220-grader-api --region us-east1 --limit 20
+gcloud run services logs read ai-ta-api --region us-east1 --limit 20
 ```
 
 Look for:
@@ -91,7 +91,7 @@ Test by calling the `/notify_student_grades` endpoint as an instructor.
 **Solution**:
 ```bash
 echo -n "your-actual-api-key" | gcloud secrets create sendgrid-api-key \
-  --project=cp220-grading-assistant \
+  --project=ai-ta \
   --data-file=-
 ```
 
@@ -147,14 +147,14 @@ If you need to create a new SendGrid API key:
 
 1. Go to [SendGrid API Keys](https://app.sendgrid.com/settings/api_keys)
 2. Click **Create API Key**
-3. Name: "CP220 Grading Assistant"
+3. Name: "AI Teaching Assistant"
 4. Permissions: **Full Access** or **Mail Send** only
 5. Click **Create & View**
 6. **IMPORTANT**: Copy the key immediately (you won't see it again!)
 7. Store it in Secret Manager:
 ```bash
 echo -n "SG.your-api-key" | gcloud secrets create sendgrid-api-key \
-  --project=cp220-grading-assistant \
+  --project=ai-ta \
   --data-file=-
 ```
 

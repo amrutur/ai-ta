@@ -1,6 +1,6 @@
 # Deployment Guide: Google Cloud Run
 
-This guide walks you through deploying the CP220 Grading Assistant API to Google Cloud Run.
+This guide walks you through deploying the AI Teaching Assistant API to Google Cloud Run.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ This guide walks you through deploying the CP220 Grading Assistant API to Google
 3. **Authenticated with Google Cloud**
    ```bash
    gcloud auth login
-   gcloud config set project cp220-grading-assistant
+   gcloud config set project ai-ta
    ```
 
 4. **Enable required APIs**
@@ -78,42 +78,42 @@ This builds the image in the cloud without needing local Docker.
 
 ```bash
 # Set your project ID
-export PROJECT_ID=cp220-grading-assistant
+export PROJECT_ID=ai-ta
 
 # Build and push using Cloud Build
-gcloud builds submit --tag gcr.io/$PROJECT_ID/cp220-grader-api
+gcloud builds submit --tag gcr.io/$PROJECT_ID/ai-ta-api
 
 # Or use Artifact Registry (newer, recommended)
-gcloud builds submit --tag us-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/cp220-grader-api
+gcloud builds submit --tag us-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/ai-ta-api
 ```
 
 ### Option B: Build Locally and Push
 
 ```bash
 # Set your project ID
-export PROJECT_ID=cp220-grading-assistant
+export PROJECT_ID=ai-ta
 
 # Build the Docker image
-docker build -t gcr.io/$PROJECT_ID/cp220-grader-api .
+docker build -t gcr.io/$PROJECT_ID/ai-ta-api .
 
 # Configure Docker to use gcloud credentials
 gcloud auth configure-docker
 
 # Push the image
-docker push gcr.io/$PROJECT_ID/cp220-grader-api
+docker push gcr.io/$PROJECT_ID/ai-ta-api
 ```
 
 ## Step 4: Deploy to Cloud Run
 
 ```bash
 # Set variables
-export PROJECT_ID=cp220-grading-assistant
-export SERVICE_NAME=cp220-grader-api
+export PROJECT_ID=ai-ta
+export SERVICE_NAME=ai-ta-api
 export REGION=asia-south1
 
 # Deploy to Cloud Run
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/cp220-grader-api \
+  --image gcr.io/$PROJECT_ID/ai-ta-api \
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
@@ -138,7 +138,7 @@ gcloud run deploy $SERVICE_NAME \
 or if you have the env.yaml file then use 
 ```bash
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/cp220-grader-api \
+  --image gcr.io/$PROJECT_ID/ai-ta-api \
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
@@ -154,9 +154,9 @@ gcloud run deploy $SERVICE_NAME \
 
 After deployment, Cloud Run will give you a URL like:
 ```
-https://cp220-grader-api-622756405105.asia-south1.run.app
+https://ai-ta-api-622756405105.asia-south1.run.app
 ```
-(Or check with: `gcloud run services describe cp220-grader-api --region asia-south1 --format 'value(status.url)'`)
+(Or check with: `gcloud run services describe ai-ta-api --region asia-south1 --format 'value(status.url)'`)
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Navigate to **APIs & Services** > **Credentials**
@@ -203,10 +203,10 @@ git commit -m "Your changes"
 git push
 
 # 2. Rebuild and redeploy
-gcloud builds submit --tag gcr.io/$PROJECT_ID/cp220-grader-api
+gcloud builds submit --tag gcr.io/$PROJECT_ID/ai-ta-api
 
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/cp220-grader-api \
+  --image gcr.io/$PROJECT_ID/ai-ta-api \
   --region $REGION \
   --platform managed
 ```
@@ -215,7 +215,7 @@ gcloud run deploy $SERVICE_NAME \
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID | `cp220-grading-assistant` |
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID | `ai-ta` |
 | `PRODUCTION` | Set to 1 for production | `1` |
 | `FIRESTORE_DATABASE_ID` | Firestore database ID | `(default)` |
 | `ADMIN_EMAILS` | Comma-separated platform admin emails | `admin@example.com` |
@@ -244,9 +244,9 @@ gcloud run services describe $SERVICE_NAME --region $REGION
 ### Test locally with Docker
 ```bash
 docker run -p 8080:8080 \
-  -e GOOGLE_CLOUD_PROJECT=cp220-grading-assistant \
+  -e GOOGLE_CLOUD_PROJECT=ai-ta \
   -e PRODUCTION=0 \
-  gcr.io/$PROJECT_ID/cp220-grader-api
+  gcr.io/$PROJECT_ID/ai-ta-api
 ```
 
 ## Security Checklist

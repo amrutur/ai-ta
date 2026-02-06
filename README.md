@@ -192,7 +192,7 @@ Students install the client package in their Colab notebooks:
 
    grades = cgc.fetch_student_list(
        assignment_name="Assignment1",
-       course_name="CP220"
+       course_name="Linear Algebra"
    )
    ```
 
@@ -200,7 +200,7 @@ Students install the client package in their Colab notebooks:
    ```python
    cgc.notify_student_grades(
        assignment_name="Assignment1",
-       course_name="CP220"
+       course_name="Linear Algebra"
    )
    ```
 
@@ -265,7 +265,7 @@ response = requests.post(
   {
     "notebook_json": {...},
     "assignment_name": "Assignment1",
-    "course_name": "CP220",
+    "course_name": "Linear Algebra",
     "submission_hash": "md5_hash"
   }
   ```
@@ -284,7 +284,7 @@ response = requests.post(
   ```json
   {
     "course_name": "Linear Algebra & Probability",
-    "course_number": "CP220",
+    "course_number": "E1 254",
     "academic_year": "2025-2026",
     "institution": "IISc Bangalore",
     "instructor_email": "prof@university.edu",
@@ -334,13 +334,13 @@ See [SENDGRID_SETUP.md](./SENDGRID_SETUP.md) for email configuration details.
 
 ```bash
 # Build the image
-docker build -t cp220-grader-api .
+docker build -t ai-ta-api .
 
 # Test locally
 docker run -p 8080:8080 \
   -e GOOGLE_CLOUD_PROJECT=your-project \
   -e PRODUCTION=0 \
-  cp220-grader-api
+  ai-ta-api
 ```
 
 ### Google Cloud Run
@@ -355,10 +355,10 @@ export PROJECT_ID=your-project-id
 export REGION=asia-south1
 
 # Build and deploy
-gcloud builds submit --tag gcr.io/$PROJECT_ID/cp220-grader-api
+gcloud builds submit --tag gcr.io/$PROJECT_ID/ai-ta-api
 
-gcloud run deploy cp220-grader-api \
-  --image gcr.io/$PROJECT_ID/cp220-grader-api \
+gcloud run deploy ai-ta-api \
+  --image gcr.io/$PROJECT_ID/ai-ta-api \
   --region $REGION \
   --platform managed \
   --allow-unauthenticated \
@@ -393,12 +393,12 @@ ai-ta/
 
 The system uses two specialized agents built with Google ADK:
 
-1. **Teaching Agent** (`cp220_2025_grader_agent`)
+1. **Teaching Agent** (`ai_ta_teaching_agent`)
    - Model: `gemini-2.0-flash`
    - Purpose: Interactive tutoring and feedback
    - Behavior: Provides progressive hints, reveals answers after 3 attempts
 
-2. **Scoring Agent** (`cp220_2025_scoring_agent`)
+2. **Scoring Agent** (`ai_ta_scoring_agent`)
    - Model: `gemini-2.0-flash`
    - Purpose: Automated grading with rubrics
    - Behavior: Component-based scoring with partial credit
@@ -436,7 +436,7 @@ Logs are written to:
 
 ## Contributing
 
-This is an educational project for CP220 course. For issues or questions, please contact the course instructor.
+This is an educational project. For issues or questions, please contact the project maintainer.
 
 ## License
 
@@ -453,6 +453,6 @@ Built with significant assistance from Google's Gemini AI and leveraging:
 
 ---
 
-**Course**: CP220 - Linear Algebra and Probability for Robotics
-**Institution**: Graduate-level course
+**Project**: AI Teaching Assistant (ai-ta)
+**Institution**: Graduate-level courses
 **Maintained by**: Bharadwaj Amrutur (amrutur@gmail.com)

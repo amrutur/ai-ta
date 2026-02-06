@@ -10,12 +10,12 @@ If you don't have Google Workspace, see the "Alternative: Use SendGrid" section 
 
 ## Overview
 
-The application uses a service account (`cp220-firestore@cp220-grading-assistant.iam.gserviceaccount.com`) with domain-wide delegation to send emails on behalf of a user in your Google Workspace domain.
+The application uses a service account (`ai-ta-firestore@ai-ta.iam.gserviceaccount.com`) with domain-wide delegation to send emails on behalf of a user in your Google Workspace domain.
 
 ## Step 1: Enable Gmail API
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Select your project: `cp220-grading-assistant`
+2. Select your project: `ai-ta`
 3. Navigate to **APIs & Services** > **Library**
 4. Search for "Gmail API"
 5. Click **Enable**
@@ -25,7 +25,7 @@ The application uses a service account (`cp220-firestore@cp220-grading-assistant
 ### A. Get Service Account Client ID
 
 1. Go to **IAM & Admin** > **Service Accounts**
-2. Find your service account: `cp220-firestore@cp220-grading-assistant.iam.gserviceaccount.com`
+2. Find your service account: `ai-ta-firestore@ai-ta.iam.gserviceaccount.com`
 3. Click on the service account
 4. Copy the **Client ID** (it's a long number, e.g., `101156988112383641306`)
    - You can also find it under "OAuth 2.0 Client ID"
@@ -58,13 +58,13 @@ export GMAIL_SENDER_EMAIL="noreply@yourdomain.com"
 
 ### For Production (Cloud Run):
 ```bash
-gcloud run services update cp220-grader-api \
+gcloud run services update ai-ta-api \
   --update-env-vars GMAIL_SENDER_EMAIL="noreply@yourdomain.com" \
   --region us-east1
 ```
 
 Or add it in the Cloud Console:
-1. Go to Cloud Run > cp220-grader-api
+1. Go to Cloud Run > ai-ta-api
 2. Click **Edit & Deploy New Revision**
 3. Add environment variable:
    - Name: `GMAIL_SENDER_EMAIL`
