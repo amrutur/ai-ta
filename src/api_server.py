@@ -248,6 +248,26 @@ async def oauth_callback(request: Request):
 
     user_id = request.session['user']['id']
     user_name = request.session['user']['name']
+    user_email = request.session['user'].get('email', '')
+
+    # If this login was initiated from /admin_login, verify admin authorization
+    if request.session.pop('admin_login', False):
+        if user_email.lower() not in [email.lower() for email in config.ADMIN_EMAILS]:
+            logging.warning(f"Unauthorized admin login attempt by {user_email}")
+            request.session.clear()
+            html_content = """
+            <html>
+                <head><title>Access Denied</title></head>
+                <body>
+                    <h1>Access Denied</h1>
+                    <p>You are not authorized to login as a platform administrator.</p>
+                    <p>Contact the platform owner if you believe this is an error.</p>
+                    <a href="/admin_login">Try again</a>
+                </body>
+            </html>
+            """
+            return HTMLResponse(content=html_content, status_code=403)
+
     user_list = get_user_list(config.db)
 
     if user_id not in user_list:
@@ -255,7 +275,7 @@ async def oauth_callback(request: Request):
         user_ref = config.db.collection(u'users').document(user_id)
         user_ref.set({
             u'name': user_name,
-            u'email': request.session['user'].get('email')
+            u'email': user_email
         })
 
     return {"message": f"Hi {request.session['user']['name']} You have successfully logged in. Happy solving!"}
@@ -600,19 +620,21 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
 # ==================== Utility Endpoints ====================
 
-@app.get("/", tags=["Authentication"], response_class=HTMLResponse)
-async def root():
+@app.get("/admin_login", tags=["Authentication"], response_class=HTMLResponse)
+async def admin_login_page(request: Request):
     """
-    Serves a simple login page with a button to initiate Google OAuth login.
+    Serves the admin login page. Sets a session flag so the OAuth callback
+    can verify the user is a platform administrator.
     """
+    request.session['admin_login'] = True
     html_content = """
     <html>
         <head>
-            <title>Login to CP220-2025 Grader API</title>
+            <title>Login to AI Teach Assistant Platform</title>
         </head>
         <body>
-            <h1>Welcome to CP220-2025 Lab Session!</h1>
-            <p>Please log in to use the CP220 Grading Assistant.</p>
+            <h1>Welcome to AI Teaching Assistant Platform</h1>
+            <p>Please log in to configure/adminster the platform.</p>
             <form action="/login" method="get">
                 <button type="submit" style="padding: 10px 20px; font-size: 16px; cursor: pointer;">Login with Google</button>
             </form>
