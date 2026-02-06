@@ -1,10 +1,10 @@
-# CP220 2025 AI Grading Assistant
+# AI Teaching Assistant Platform
 
-An AI-powered teaching and grading assistant for graduate courses in linear algebra and probability, with applications to machine learning, AI, and robotics. The system provides automated feedback, grading, and personalized tutoring for students working on assignments in Google Colab notebooks.
+An AI-powered teaching and grading assistant for graduate courses.The system provides automated feedback, grading, and personalized tutoring for students working on assignments in Google Colab notebooks.
 
 ## Overview
 
-This repository contains the **server-side API** for the CP220 grading system. It works in conjunction with the [colab_grading_client](https://github.com/amrutur/colab_grading_client) Python package, which provides client-side functions for students to interact with the grading assistant directly from their Google Colab notebooks.
+This repository contains the **server-side API** for the AI treaching  assistant and grading system. It works in conjunction with the [colab_grading_client](https://github.com/amrutur/colab_grading_client) Python package, which provides client-side functions for students to interact with the grading assistant directly from their Google Colab notebooks.
 
 ### System Architecture
 
@@ -75,8 +75,8 @@ This repository contains the **server-side API** for the CP220 grading system. I
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/amrutur/cp220-2025-grader.git
-   cd cp220-2025-grader
+   git clone https://github.com/amrutur/ai-ta.git
+   cd ai-ta
    ```
 
 2. **Install dependencies**
