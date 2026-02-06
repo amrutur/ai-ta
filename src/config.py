@@ -57,6 +57,15 @@ enable_assist = False
 active_eval_api = False
 
 
+# --- Admin Emails ---
+
+admin_emails_env = os.environ.get('ADMIN_EMAILS', '')
+ADMIN_EMAILS = [email.strip() for email in admin_emails_env.split(',') if email.strip()]
+
+if not ADMIN_EMAILS:
+    logging.warning("No admin emails configured. Set ADMIN_EMAILS environment variable with comma-separated email addresses.")
+
+
 # --- Instructor Emails ---
 
 instructor_emails_env = os.environ.get('INSTRUCTOR_EMAILS', '')

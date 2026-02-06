@@ -126,3 +126,20 @@ def get_instructor_user(request: Request) -> Dict[str, Any]:
         )
 
     return user
+
+def get_admin_user(request: Request) -> Dict[str, Any]:
+    """
+    Dependency to verify the current user is a platform administrator.
+    Add admin email addresses to the ADMIN_EMAILS environment variable.
+    """
+    user = get_current_user(request)
+
+    user_email = user.get('email', '').lower()
+
+    if user_email not in [email.lower() for email in config.ADMIN_EMAILS]:
+        raise HTTPException(
+            status_code=403,
+            detail="Access forbidden. This endpoint is only available to platform administrators."
+        )
+
+    return user

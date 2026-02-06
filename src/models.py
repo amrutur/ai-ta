@@ -2,6 +2,7 @@
 Pydantic request/response models for the API endpoints.
 """
 
+from datetime import datetime
 from pydantic import BaseModel, AnyUrl, EmailStr
 from typing import Dict, Any
 
@@ -75,3 +76,21 @@ class FetchStudentListRequest(BaseModel):
 
 class FetchStudentListResponse(BaseModel):
     response: Dict[str, Any] | None = None
+
+class CreateCourseRequest(BaseModel):
+    course_name: str
+    course_number: str
+    academic_year: str
+    institution: str
+    instructor_email: EmailStr
+    instructor_gmail: EmailStr
+    instructor_name: str
+    start_date: datetime
+    end_date: datetime
+    ta_name: str | None = None
+    ta_email: EmailStr | None = None
+    ta_gmail: EmailStr | None = None
+
+class CreateCourseResponse(BaseModel):
+    response: str
+    course_id: str

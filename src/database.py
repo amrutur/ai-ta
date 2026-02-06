@@ -66,6 +66,55 @@ def update_marks(db, google_user_id, notebook_id, total_marks, max_marks, graded
     except Exception as e:
         logging.error(f"Error updating marks in Firestore: {e}")
 
+def create_course(db, course_data: dict) -> str:
+    '''Create a new course in the Firestore database.
+
+    Args:
+        db: Firestore client
+        course_data: Dictionary with course fields (course_name, course_number,
+            academic_year, institution, instructor_email, instructor_gmail,
+            instructor_name, start_date, end_date, and optional ta_name,
+            ta_email, ta_gmail)
+
+    Returns:
+        The course document ID (course_number)
+
+    Raises:
+        ValueError: If a course with the same course_number already exists
+    '''
+    course_number = course_data['course_number']
+    course_ref = db.collection(u'courses').document(course_number)
+
+    # Check if course already exists
+    if course_ref.get().exists:
+        raise ValueError(f"Course '{course_number}' already exists")
+
+    doc = {
+        u'course_name': course_data['course_name'],
+        u'course_number': course_number,
+        u'academic_year': course_data['academic_year'],
+        u'institution': course_data['institution'],
+        u'instructor_email': course_data['instructor_email'],
+        u'instructor_gmail': course_data['instructor_gmail'],
+        u'instructor_name': course_data['instructor_name'],
+        u'start_date': course_data['start_date'],
+        u'end_date': course_data['end_date'],
+        u'created_at': firestore.SERVER_TIMESTAMP,
+    }
+
+    # Add optional TA fields if provided
+    if course_data.get('ta_name'):
+        doc[u'ta_name'] = course_data['ta_name']
+    if course_data.get('ta_email'):
+        doc[u'ta_email'] = course_data['ta_email']
+    if course_data.get('ta_gmail'):
+        doc[u'ta_gmail'] = course_data['ta_gmail']
+
+    course_ref.set(doc)
+    logging.info(f"Created course '{course_data['course_name']}' ({course_number})")
+    return course_number
+
+
 def fetch_grader_response(db, notebook_id: str = None, user_email: str = None):
     '''
     Get the graded answer for the student user_email for notebook_id in the Firestore database.

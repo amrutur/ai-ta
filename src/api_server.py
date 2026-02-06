@@ -55,12 +55,14 @@ from models import (
     FetchGradedRequest, FetchGradedResponse,
     NotifyGradedRequest, NotifyGradedResponse,
     FetchStudentListRequest, FetchStudentListResponse,
+    CreateCourseRequest, CreateCourseResponse,
 )
 from auth import (
     credentials_to_dict,
     create_jwt_token,
     get_current_user,
     get_instructor_user,
+    get_admin_user,
 )
 from database import (
     get_user_list,
@@ -68,6 +70,7 @@ from database import (
     add_answer_notebook,
     update_marks,
     fetch_grader_response,
+    create_course,
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from agent_service import run_agent_and_get_response, score_question, evaluate
@@ -959,6 +962,49 @@ async def fetch_student_list_api(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
+
+
+# ==================== Admin Endpoints ====================
+
+@app.post("/create_course", response_model=CreateCourseResponse)
+async def create_course_api(
+    query_body: CreateCourseRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_admin_user)
+):
+    '''Create a new course in the platform.
+    This endpoint is only accessible to platform administrators.'''
+    try:
+        course_data = {
+            'course_name': query_body.course_name,
+            'course_number': query_body.course_number,
+            'academic_year': query_body.academic_year,
+            'institution': query_body.institution,
+            'instructor_email': query_body.instructor_email,
+            'instructor_gmail': query_body.instructor_gmail,
+            'instructor_name': query_body.instructor_name,
+            'start_date': query_body.start_date,
+            'end_date': query_body.end_date,
+            'ta_name': query_body.ta_name,
+            'ta_email': query_body.ta_email,
+            'ta_gmail': query_body.ta_gmail,
+        }
+
+        course_id = create_course(config.db, course_data)
+
+        logging.info(f"Admin {current_user.get('email')} created course '{query_body.course_name}' ({course_id})")
+
+        return CreateCourseResponse(
+            response=f"Course '{query_body.course_name}' ({query_body.course_number}) created successfully.",
+            course_id=course_id
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logging.error("An exception occurred during create_course_api: %s", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
 if __name__ == "__main__":
