@@ -14,6 +14,7 @@ It logs the interactions in a Firsestore NoSQl database
 Required environment parameters:
 GOOGLE_CLOUD_PROECT (should be set to be the project id for the application google cloud)
 PRODUCTION (should be set to 0 for local testing and 1 for production)
+ADMIN_EMAILS (comma-separated list of platform administrator email addresses)
 INSTRUCTOR_EMAILS (comma-separated list of authorized instructor email addresses)
 OAUTH_REDIRECT_URI (optional, for development with ngrok - e.g., https://yoursubdomain.ngrok-free.app/callback)
 SENDGRID_FROM_EMAIL (email address to send emails from)
@@ -999,8 +1000,6 @@ async def create_course_api(
             course_id=course_id
         )
 
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logging.error("An exception occurred during create_course_api: %s", e)
         traceback.print_exc()

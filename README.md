@@ -17,7 +17,7 @@ This repository contains the **server-side API** for the AI treaching  assistant
             ↓
 ┌─────────────────────────┐
 │  FastAPI Server         │  ← This repository
-│  (api_server.py)        │
+│  (src/api_server.py)    │
 └───────────┬─────────────┘
             │
     ┌───────┴────────┐
@@ -26,6 +26,22 @@ This repository contains the **server-side API** for the AI treaching  assistant
 │ Gemini  │    │Firestore │
 │  AI     │    │ Database │
 └─────────┘    └──────────┘
+```
+
+### Firestore Database Schema
+
+```
+db
+└── courses (collection)
+    └── {auto-id} (document)
+        ├── course_name, course_number, academic_year, institution
+        ├── instructor_email, instructor_gmail, instructor_name
+        ├── start_date, end_date, created_at
+        ├── ta_name, ta_email, ta_gmail (optional)
+        └── students (subcollection)
+            └── {student-id} (document)
+                └── assignments (subcollection)
+                    └── {assignment-id} (document)
 ```
 
 ## Key Features
@@ -90,6 +106,7 @@ This repository contains the **server-side API** for the AI treaching  assistant
    ```bash
    GOOGLE_CLOUD_PROJECT=your-project-id
    PRODUCTION=0  # Set to 1 for production
+   ADMIN_EMAILS=admin@example.com  # Platform administrator emails
    INSTRUCTOR_EMAILS=instructor1@example.com,instructor2@example.com
    OAUTH_REDIRECT_URI=http://localhost:8080/callback  # Or your ngrok URL
    SENDGRID_FROM_EMAIL=noreply@yourdomain.com
@@ -107,7 +124,7 @@ This repository contains the **server-side API** for the AI treaching  assistant
 
 5. **Run the development server**
    ```bash
-   python api_server.py
+   python src/api_server.py
    ```
 
    The server will start at `http://localhost:8080`
@@ -262,6 +279,26 @@ response = requests.post(
 - `POST /fetch_student_list` - Get all student grades for a course/assignment
 - `POST /notify_student_grades` - Send email notifications to students with their grades
 
+### Admin Operations (Requires Admin Authentication)
+- `POST /create_course` - Create a new course on the platform
+  ```json
+  {
+    "course_name": "Linear Algebra & Probability",
+    "course_number": "CP220",
+    "academic_year": "2025-2026",
+    "institution": "IISc Bangalore",
+    "instructor_email": "prof@university.edu",
+    "instructor_gmail": "prof@gmail.com",
+    "instructor_name": "Prof. Smith",
+    "start_date": "2025-08-01T00:00:00",
+    "end_date": "2025-12-15T00:00:00",
+    "ta_name": "Jane Doe",
+    "ta_email": "jane@university.edu",
+    "ta_gmail": "jane@gmail.com"
+  }
+  ```
+  Returns the auto-generated course ID. Multiple courses with the same course number are allowed (e.g. across different institutions or academic years).
+
 ### Diagnostics
 - `GET /` - Health check
 - `GET /session-test` - Test session configuration (development)
@@ -274,6 +311,7 @@ response = requests.post(
 |----------|----------|-------------|
 | `GOOGLE_CLOUD_PROJECT` | Yes | Google Cloud project ID |
 | `PRODUCTION` | Yes | `0` for development, `1` for production |
+| `ADMIN_EMAILS` | Yes | Comma-separated list of platform admin emails |
 | `INSTRUCTOR_EMAILS` | Yes | Comma-separated list of instructor emails |
 | `OAUTH_REDIRECT_URI` | No | OAuth redirect URI (for ngrok development) |
 | `SENDGRID_FROM_EMAIL` | Yes | Sender email for notifications |
@@ -333,12 +371,20 @@ gcloud run deploy cp220-grader-api \
 ### Project Structure
 
 ```
-cp220-2025-grader/
-├── api_server.py          # Main FastAPI server
-├── agent.py               # AI agent definitions (teaching & scoring)
+ai-ta/
+├── src/
+│   ├── api_server.py      # FastAPI app, middleware, and route handlers
+│   ├── config.py          # Configuration, secrets, and service initialization
+│   ├── models.py          # Pydantic request/response models
+│   ├── auth.py            # OAuth helpers, JWT, and auth dependencies
+│   ├── database.py        # Firestore CRUD operations
+│   ├── agent.py           # AI agent definitions (teaching & scoring)
+│   ├── agent_service.py   # Agent orchestration and scoring logic
+│   ├── drive_utils.py     # Google Drive / Colab notebook utilities
+│   ├── email_service.py   # SendGrid email utility
+│   └── __init__.py        # Package initialization
 ├── requirements.txt       # Python dependencies
 ├── Dockerfile             # Container definition
-├── .dockerignore          # Docker build exclusions
 ├── DEPLOYMENT.md          # Deployment guide
 ├── SENDGRID_SETUP.md      # Email configuration guide
 └── README.md              # This file
@@ -370,7 +416,7 @@ ngrok http 8080
 export OAUTH_REDIRECT_URI=https://your-subdomain.ngrok-free.app/callback
 
 # Run server
-python api_server.py
+python src/api_server.py
 ```
 
 ### Logging
