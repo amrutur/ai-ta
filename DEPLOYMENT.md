@@ -39,7 +39,6 @@ Create a file to store your production environment variable values (DO NOT commi
 ```bash
 # .env (DO NOT COMMIT)
 ADMIN_EMAILS=admin@example.com
-INSTRUCTOR_EMAILS=instructor1@example.com,instructor2@example.com
 GOOGLE_CLOUD_PROJECT=your_project_name
 SERVICE_ACCOUNT_EMAIL=email_id@project_id.iam.gserviceaccount.com
 FIRESTORE_CLIENT_ID=<id>
@@ -122,7 +121,6 @@ gcloud run deploy $SERVICE_NAME \
   --set-env-vars "PRODUCTION=1" \
   --set-env-vars "FIRESTORE_DATABASE_ID=your-database-id" \
   --set-env-vars "ADMIN_EMAILS=admin@example.com" \
-  --set-env-vars "INSTRUCTOR_EMAILS=instructor1@example.com,instructor2@example.com" \
   --set-env-vars "SENDGRID_FROM_EMAIL=noreply@yourdomain.com" \
   --set-env-vars "OAUTH_CLIENT_ID_KEY_NAME=oauth-client-id" \
   --set-env-vars "OAUTH_CLIENT_SECRET_KEY_NAME=oauth-client-secret" \
@@ -221,7 +219,6 @@ gcloud run deploy $SERVICE_NAME \
 | `PRODUCTION` | Set to 1 for production | `1` |
 | `FIRESTORE_DATABASE_ID` | Firestore database ID | `(default)` |
 | `ADMIN_EMAILS` | Comma-separated platform admin emails | `admin@example.com` |
-| `INSTRUCTOR_EMAILS` | Comma-separated instructor emails | `prof@example.com,ta@example.com` |
 | `SENDGRID_FROM_EMAIL` | Email address to send from (must be verified in SendGrid) | `noreply@yourdomain.com` |
 | `OAUTH_REDIRECT_URI` | Optional custom redirect URI | Only for dev with ngrok |
 | Secret key environment variables (point to Secret Manager secrets) ||

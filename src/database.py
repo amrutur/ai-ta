@@ -27,6 +27,29 @@ def _make_bucket_name(institution: str, academic_year: str, course_number: str) 
     return name
 
 
+def is_instructor_for_any_course(db, email: str) -> bool:
+    '''Check if the given email is an instructor or TA for any course.
+
+    Scans all course documents and checks the instructor_email and ta_email
+    fields (case-insensitive).
+    '''
+    email_lower = email.lower()
+    courses_ref = db.collection(u'courses').stream()
+    for doc in courses_ref:
+        data = doc.to_dict()
+        if data.get('instructor_email', '').lower() == email_lower:
+            return True
+        if data.get('instructor_gmail', '').lower() == email_lower:
+            return True
+        ta_email = data.get('ta_email', '')
+        if ta_email and ta_email.lower() == email_lower:
+            return True
+        ta_gmail = data.get('ta_gmail', '')
+        if ta_gmail and ta_gmail.lower() == email_lower:
+            return True
+    return False
+
+
 def get_user_list(db):
     '''Return the list of user IDs in the Firestore database.'''
     users_ref = db.collection('users')

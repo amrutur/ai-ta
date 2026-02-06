@@ -13,6 +13,7 @@ from jwt.exceptions import InvalidTokenError
 from fastapi import HTTPException, Request
 
 import config
+from database import is_instructor_for_any_course
 
 
 def credentials_to_dict(credentials):
@@ -111,15 +112,14 @@ def get_current_user(request: Request) -> Dict[str, Any]:
 
 def get_instructor_user(request: Request) -> Dict[str, Any]:
     """
-    Dependency to verify the current user is an instructor.
-    Add instructor email addresses to the INSTRUCTOR_EMAILS list in the environment.
+    Dependency to verify the current user is an instructor or TA for at least
+    one course. Instructor/TA emails are configured per-course in Firestore.
     """
     user = get_current_user(request)
 
     user_email = user.get('email', '').lower()
 
-    # Check if user email is in the instructor list
-    if user_email not in [email.lower() for email in config.INSTRUCTOR_EMAILS]:
+    if not is_instructor_for_any_course(config.db, user_email):
         raise HTTPException(
             status_code=403,
             detail="Access forbidden. This endpoint is only available to instructors."

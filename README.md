@@ -108,7 +108,6 @@ db
    GOOGLE_CLOUD_PROJECT=your-project-id
    PRODUCTION=0  # Set to 1 for production
    ADMIN_EMAILS=admin@example.com  # Platform administrator emails
-   INSTRUCTOR_EMAILS=instructor1@example.com,instructor2@example.com
    OAUTH_REDIRECT_URI=http://localhost:8080/callback  # Or your ngrok URL
    SENDGRID_FROM_EMAIL=noreply@yourdomain.com
    SERVICE_ACCOUNT_EMAIL=your-service-account@project.iam.gserviceaccount.com
@@ -313,7 +312,6 @@ response = requests.post(
 | `GOOGLE_CLOUD_PROJECT` | Yes | Google Cloud project ID |
 | `PRODUCTION` | Yes | `0` for development, `1` for production |
 | `ADMIN_EMAILS` | Yes | Comma-separated list of platform admin emails |
-| `INSTRUCTOR_EMAILS` | Yes | Comma-separated list of instructor emails |
 | `OAUTH_REDIRECT_URI` | No | OAuth redirect URI (for ngrok development) |
 | `SENDGRID_FROM_EMAIL` | Yes | Sender email for notifications |
 | `SERVICE_ACCOUNT_EMAIL` | Yes | Service account email |

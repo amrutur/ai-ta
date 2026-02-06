@@ -66,15 +66,6 @@ if not ADMIN_EMAILS:
     logging.warning("No admin emails configured. Set ADMIN_EMAILS environment variable with comma-separated email addresses.")
 
 
-# --- Instructor Emails ---
-
-instructor_emails_env = os.environ.get('INSTRUCTOR_EMAILS', '')
-INSTRUCTOR_EMAILS = [email.strip() for email in instructor_emails_env.split(',') if email.strip()]
-
-if not INSTRUCTOR_EMAILS:
-    logging.warning("No instructor emails configured. Set INSTRUCTOR_EMAILS environment variable with comma-separated email addresses.")
-
-
 # --- OAuth Scopes ---
 
 SCOPES = [

@@ -15,7 +15,6 @@ Required environment parameters:
 GOOGLE_CLOUD_PROECT (should be set to be the project id for the application google cloud)
 PRODUCTION (should be set to 0 for local testing and 1 for production)
 ADMIN_EMAILS (comma-separated list of platform administrator email addresses)
-INSTRUCTOR_EMAILS (comma-separated list of authorized instructor email addresses)
 OAUTH_REDIRECT_URI (optional, for development with ngrok - e.g., https://yoursubdomain.ngrok-free.app/callback)
 SENDGRID_FROM_EMAIL (email address to send emails from)
 
@@ -72,6 +71,7 @@ from database import (
     update_marks,
     fetch_grader_response,
     create_course,
+    is_instructor_for_any_course,
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from agent_service import run_agent_and_get_response, score_question, evaluate
@@ -678,8 +678,8 @@ async def fetch_grader_response_api(
         user_email = query_body.user_email
         authenticated_email = current_user.get('email', '').lower()
 
-        # Check if the authenticated user is an instructor
-        is_instructor = authenticated_email in [email.lower() for email in config.INSTRUCTOR_EMAILS]
+        # Check if the authenticated user is an instructor for any course
+        is_instructor = is_instructor_for_any_course(config.db, authenticated_email)
 
         # Check authorization: user must be fetching their own grades OR be an instructor
         if not is_instructor and authenticated_email != user_email.lower():
