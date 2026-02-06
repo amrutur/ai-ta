@@ -991,13 +991,14 @@ async def create_course_api(
             'ta_gmail': query_body.ta_gmail,
         }
 
-        course_id = create_course(config.db, course_data)
+        course_id, bucket_name = create_course(config.db, course_data)
 
-        logging.info(f"Admin {current_user.get('email')} created course '{query_body.course_name}' ({course_id})")
+        logging.info(f"Admin {current_user.get('email')} created course '{query_body.course_name}' ({course_id}), bucket: {bucket_name}")
 
         return CreateCourseResponse(
             response=f"Course '{query_body.course_name}' ({query_body.course_number}) created successfully.",
-            course_id=course_id
+            course_id=course_id,
+            bucket_name=bucket_name
         )
 
     except Exception as e:

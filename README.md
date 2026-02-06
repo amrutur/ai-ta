@@ -37,6 +37,7 @@ db
         ├── course_name, course_number, academic_year, institution
         ├── instructor_email, instructor_gmail, instructor_name
         ├── start_date, end_date, created_at
+        ├── bucket_name (derived: institution-academic_year-course_number)
         ├── ta_name, ta_email, ta_gmail (optional)
         └── students (subcollection)
             └── {student-id} (document)
@@ -297,7 +298,7 @@ response = requests.post(
     "ta_gmail": "jane@gmail.com"
   }
   ```
-  Returns the auto-generated course ID. Multiple courses with the same course number are allowed (e.g. across different institutions or academic years).
+  Returns the auto-generated course ID and `bucket_name`. The `bucket_name` is automatically derived as a GCS-safe concatenation of `institution`, `academic_year`, and `course_number` (lowercased, spaces replaced with hyphens). Multiple courses with the same course number are allowed (e.g. across different institutions or academic years).
 
 ### Diagnostics
 - `GET /` - Health check

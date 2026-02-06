@@ -11,6 +11,22 @@ import re
 from firebase_admin import firestore
 
 
+def _make_bucket_name(institution: str, academic_year: str, course_number: str) -> str:
+    '''Derive a GCS bucket name from institution, academic year, and course number.
+
+    Concatenates the three values with hyphens, lowercased, with spaces and
+    special characters replaced to produce a valid GCS bucket name.
+    '''
+    raw = f"{institution}-{academic_year}-{course_number}"
+    # Lowercase, replace spaces/underscores with hyphens, strip non-alphanumeric except hyphens
+    name = raw.lower()
+    name = re.sub(r'[\s_]+', '-', name)
+    name = re.sub(r'[^a-z0-9\-]', '', name)
+    # Collapse multiple hyphens and strip leading/trailing hyphens
+    name = re.sub(r'-+', '-', name).strip('-')
+    return name
+
+
 def get_user_list(db):
     '''Return the list of user IDs in the Firestore database.'''
     users_ref = db.collection('users')
@@ -82,6 +98,12 @@ def create_course(db, course_data: dict) -> str:
     Returns:
         The auto-generated course document ID
     '''
+    bucket_name = _make_bucket_name(
+        course_data['institution'],
+        course_data['academic_year'],
+        course_data['course_number'],
+    )
+
     doc = {
         u'course_name': course_data['course_name'],
         u'course_number': course_data['course_number'],
@@ -92,6 +114,7 @@ def create_course(db, course_data: dict) -> str:
         u'instructor_name': course_data['instructor_name'],
         u'start_date': course_data['start_date'],
         u'end_date': course_data['end_date'],
+        u'bucket_name': bucket_name,
         u'created_at': firestore.SERVER_TIMESTAMP,
     }
 
@@ -106,8 +129,8 @@ def create_course(db, course_data: dict) -> str:
     # Use add() to let Firestore generate a unique document ID
     _, course_ref = db.collection(u'courses').add(doc)
     course_id = course_ref.id
-    logging.info(f"Created course '{course_data['course_name']}' ({course_data['course_number']}) with ID: {course_id}")
-    return course_id
+    logging.info(f"Created course '{course_data['course_name']}' ({course_data['course_number']}) with ID: {course_id}, bucket: {bucket_name}")
+    return course_id, bucket_name
 
 
 def fetch_grader_response(db, notebook_id: str = None, user_email: str = None):

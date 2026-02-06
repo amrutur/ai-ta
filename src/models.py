@@ -94,3 +94,4 @@ class CreateCourseRequest(BaseModel):
 class CreateCourseResponse(BaseModel):
     response: str
     course_id: str
+    bucket_name: str
