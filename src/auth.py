@@ -23,7 +23,7 @@ def credentials_to_dict(credentials):
             'token_uri': credentials.token_uri,
             'client_id': credentials.client_id,
             'client_secret': credentials.client_secret,
-            'scopes': credentials.scopes}
+            'scopes': list(credentials.scopes) if credentials.scopes else []}
 
 def create_jwt_token(user_data: Dict[str, Any], secret_key: str, expires_hours: int = 24) -> str:
     """

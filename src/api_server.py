@@ -243,8 +243,17 @@ async def oauth_callback(request: Request):
     # Store credentials and user info in the session.
     # In a real app, you might store credentials in a database linked to the user.
     request.session['credentials'] = credentials_to_dict(flow_creds)
-    userinfo_service = build('oauth2', 'v2', credentials=flow_creds)
-    request.session['user'] = userinfo_service.userinfo().get().execute()
+
+    try:
+        userinfo_service = build('oauth2', 'v2', credentials=flow_creds)
+        request.session['user'] = userinfo_service.userinfo().get().execute()
+    except Exception as e:
+        logging.error(f"Failed to retrieve user info from Google: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve user info from Google: {str(e)}"
+        )
 
     user_id = request.session['user']['id']
     user_name = request.session['user']['name']
@@ -268,15 +277,20 @@ async def oauth_callback(request: Request):
             """
             return HTMLResponse(content=html_content, status_code=403)
 
-    user_list = get_user_list(config.db)
+    try:
+        user_list = get_user_list(config.db)
 
-    if user_id not in user_list:
-        print(f"User '{user_name}' ({user_id}) not in database. Adding now.")
-        user_ref = config.db.collection(u'users').document(user_id)
-        user_ref.set({
-            u'name': user_name,
-            u'email': user_email
-        })
+        if user_id not in user_list:
+            logging.info(f"User '{user_name}' ({user_id}) not in database. Adding now.")
+            user_ref = config.db.collection(u'users').document(user_id)
+            user_ref.set({
+                u'name': user_name,
+                u'email': user_email
+            })
+    except Exception as e:
+        logging.error(f"Firestore error during user lookup/creation: {e}")
+        traceback.print_exc()
+        # Don't block login for database errors - user is already authenticated
 
     return {"message": f"Hi {request.session['user']['name']} You have successfully logged in. Happy solving!"}
 
