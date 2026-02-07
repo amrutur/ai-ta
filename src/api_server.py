@@ -33,7 +33,6 @@ import logging
 import traceback
 import json
 import uuid
-import warnings
 from typing import Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -204,9 +203,14 @@ async def oauth_callback(request: Request):
         raise HTTPException(status_code=400, detail="State mismatch, possible CSRF attack.")
 
 
+    # Create flow WITHOUT scopes for the callback.  Scopes were already sent
+    # to Google in /login; re-specifying them here causes oauthlib to compare
+    # requested vs granted scopes and raise a Warning (via `raise`, not
+    # warnings.warn) that aborts fetch_token before the access token is set.
+    # Passing scopes=None skips that comparison entirely.
     flow = Flow.from_client_config(
         client_config=config.client_config,
-        scopes=config.SCOPES,
+        scopes=None,
         redirect_uri=config.client_config['web']['redirect_uris'][config.REDIRECT_URI_INDEX]
         )
 
@@ -223,14 +227,8 @@ async def oauth_callback(request: Request):
 
     logging.info(f"Callback: Using authorization_response: {authorization_response[:100]}...")
 
-    # Fetch token - suppress scope-mismatch warnings so they don't interrupt
-    # the token exchange.  Google may not grant all requested scopes (e.g.
-    # drive.readonly, gmail.send) and requests_oauthlib raises a Warning that
-    # can abort fetch_token before the access token is fully set on the session.
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            flow.fetch_token(authorization_response=authorization_response)
+        flow.fetch_token(authorization_response=authorization_response)
     except Exception as e:
         logging.error(f"OAuth token exchange failed: {e}")
         traceback.print_exc()
