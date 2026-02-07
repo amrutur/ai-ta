@@ -334,13 +334,13 @@ See [SENDGRID_SETUP.md](./SENDGRID_SETUP.md) for email configuration details.
 
 ```bash
 # Build the image
-docker build -t ai-ta-api .
+docker build -t ai-ta .
 
 # Test locally
 docker run -p 8080:8080 \
   -e GOOGLE_CLOUD_PROJECT=your-project \
   -e PRODUCTION=0 \
-  ai-ta-api
+  $SERVICE_NAME
 ```
 
 ### Google Cloud Run
@@ -352,13 +352,14 @@ Quick deployment:
 ```bash
 # Set project
 export PROJECT_ID=your-project-id
+export SERVICE_NAME=your-service-name
 export REGION=asia-south1
 
 # Build and deploy
-gcloud builds submit --tag gcr.io/$PROJECT_ID/ai-ta-api
+gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME
 
-gcloud run deploy ai-ta-api \
-  --image gcr.io/$PROJECT_ID/ai-ta-api \
+gcloud run deploy $SERVICE_NAME \
+  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
   --region $REGION \
   --platform managed \
   --allow-unauthenticated \

@@ -78,42 +78,44 @@ This builds the image in the cloud without needing local Docker.
 
 ```bash
 # Set your project ID
-export PROJECT_ID=ai-ta
+export PROJECT_ID=<your-project-id>
+export SERVICE_NAME=<your-service-name>
 
 # Build and push using Cloud Build
-gcloud builds submit --tag gcr.io/$PROJECT_ID/ai-ta-api
+gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME
 
 # Or use Artifact Registry (newer, recommended)
-gcloud builds submit --tag us-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/ai-ta-api
+gcloud builds submit --tag us-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 ```
 
 ### Option B: Build Locally and Push
 
 ```bash
 # Set your project ID
-export PROJECT_ID=ai-ta
+export PROJECT_ID=<your-project-id>
+export SERVICE_NAME=<your-service-name>
 
 # Build the Docker image
-docker build -t gcr.io/$PROJECT_ID/ai-ta-api .
+docker build -t gcr.io/$PROJECT_ID/$SERVICE_NAME .
 
 # Configure Docker to use gcloud credentials
 gcloud auth configure-docker
 
 # Push the image
-docker push gcr.io/$PROJECT_ID/ai-ta-api
+docker push gcr.io/$PROJECT_ID/$SERVICE_NAME
 ```
 
 ## Step 4: Deploy to Cloud Run
 
 ```bash
 # Set variables
-export PROJECT_ID=ai-ta
-export SERVICE_NAME=ai-ta-api
+export PROJECT_ID=<your-project-id>
+export SERVICE_NAME=<your-service-name>
 export REGION=asia-south1
 
 # Deploy to Cloud Run
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/ai-ta-api \
+  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
@@ -138,7 +140,7 @@ gcloud run deploy $SERVICE_NAME \
 or if you have the env.yaml file then use 
 ```bash
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/ai-ta-api \
+  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
@@ -154,9 +156,9 @@ gcloud run deploy $SERVICE_NAME \
 
 After deployment, Cloud Run will give you a URL like:
 ```
-https://ai-ta-api-622756405105.asia-south1.run.app
+https://<your-service-name>-622756405105.asia-south1.run.app
 ```
-(Or check with: `gcloud run services describe ai-ta-api --region asia-south1 --format 'value(status.url)'`)
+(Or check with: `gcloud run services describe <your-service-name> --region asia-south1 --format 'value(status.url)'`)
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Navigate to **APIs & Services** > **Credentials**
@@ -203,10 +205,10 @@ git commit -m "Your changes"
 git push
 
 # 2. Rebuild and redeploy
-gcloud builds submit --tag gcr.io/$PROJECT_ID/ai-ta-api
+gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME
 
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/ai-ta-api \
+  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
   --region $REGION \
   --platform managed
 ```
@@ -246,7 +248,7 @@ gcloud run services describe $SERVICE_NAME --region $REGION
 docker run -p 8080:8080 \
   -e GOOGLE_CLOUD_PROJECT=ai-ta \
   -e PRODUCTION=0 \
-  gcr.io/$PROJECT_ID/ai-ta-api
+  gcr.io/$PROJECT_ID/$SERVICE_NAME
 ```
 
 ## Security Checklist
