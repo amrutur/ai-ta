@@ -284,7 +284,7 @@ async def oauth_callback(request: Request):
                     <h1>Access Denied</h1>
                     <p>You are not authorized to login as a platform administrator.</p>
                     <p>Contact the platform owner if you believe this is an error.</p>
-                    <a href="/admin_login">Try again</a>
+                    <a href="/">Try again</a>
                 </body>
             </html>
             """
@@ -647,7 +647,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
 # ==================== Utility Endpoints ====================
 
-@app.get("/admin_login", tags=["Authentication"], response_class=HTMLResponse)
+@app.get("/", tags=["Authentication"], response_class=HTMLResponse)
 async def admin_login_page(request: Request):
     """
     Serves the admin login page. Sets a session flag so the OAuth callback
