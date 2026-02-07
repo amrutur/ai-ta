@@ -85,7 +85,7 @@ export SERVICE_NAME=<your-service-name>
 gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME
 
 # Or use Artifact Registry (newer, recommended)
-gcloud builds submit --tag us-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
+gcloud builds submit --tag asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 ```
 
 ### Option B: Build Locally and Push
@@ -200,7 +200,7 @@ When you make code changes:
 
 ```bash
 # 1. Commit your changes to git
-git add .
+git add .gcloud builds submit --tag asia-south1-docker.pkg.dev/ai-ta-486602/cloud-run-source-deploy/ai-ta
 git commit -m "Your changes"
 git push
 
