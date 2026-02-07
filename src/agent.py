@@ -18,7 +18,7 @@ ta_prompt_general= """Your are a friendly teaching assistant for a graduate cour
 ta_prompt_instructor=""""""
 
 root_agent = Agent(
-    name="AI Tutor Agent",
+    name="ai_tutor_agent",
     model="gemini-3.0-pro-preview",  # You can replace this with your preferred model
     description="A teaching assistant agent.",
     instruction=ta_prompt_general + ta_prompt_instructor,
@@ -42,7 +42,7 @@ Provide the reasoning for marking the components, but dont repeat the assignment
 scoring_prompt_instructor=""""""
 
 scoring_agent = Agent(
-    name="AI Scoring_agent",
+    name="ai_scoring_agent",
     model="gemini-3.0-pro-preview",  # You can replace this with your preferred model
     description="A scoring agent that introduces itself.",
     instruction=scoring_prompt_general + scoring_prompt_instructor,
