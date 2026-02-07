@@ -126,7 +126,14 @@ def load_app_config():
     signing_secret_key = get_required_secret('SIGNING_SECRET_KEY_NAME')
     firestore_key_id = get_required_secret('FIRESTORE_PRIVATE_KEY_ID_KEY_NAME')
     firestore_key_raw = get_required_secret('FIRESTORE_PRIVATE_KEY_KEY_NAME')
-    gemini_api_key = get_required_secret('GEMINI_API_KEY_NAME')
+    # Gemini API key is optional — not needed when using Vertex AI with a service account
+    gemini_api_key_name = os.environ.get('GEMINI_API_KEY_NAME', '')
+    gemini_api_key = None
+    if gemini_api_key_name:
+        gemini_api_key = access_secret_payload(project_id, gemini_api_key_name)
+        if not gemini_api_key:
+            print(f"Warning: Could not retrieve Gemini API key from secret '{gemini_api_key_name}'. "
+                  "Falling back to Vertex AI service account auth.", file=sys.stderr)
 
     # Get SendGrid API key from Secret Manager
     sendgrid_api_key = access_secret_payload(project_id, 'sendgrid-api-key')
@@ -251,9 +258,11 @@ REDIRECT_URI_INDEX = _config["redirect_uri_index"]
 firestore_cred_dict = _config["firestore_cred_dict"]
 is_production = _config["is_production"]
 
-os.environ['GOOGLE_API_KEY'] = str(_config["gemini_api_key"])
+# Set Gemini API key if provided; otherwise Vertex AI uses service account auth
+if _config.get("gemini_api_key"):
+    os.environ['GOOGLE_API_KEY'] = str(_config["gemini_api_key"])
 
-# Import agents (must be after GOOGLE_API_KEY is set)
+# Import agents
 import agent
 root_agent = agent.root_agent
 scoring_agent = agent.scoring_agent
