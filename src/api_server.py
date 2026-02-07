@@ -355,7 +355,7 @@ async def assist(query_body: AssistRequest, request: Request):
                 )
 
         rubric = ''
-
+        q_id = int(query_body.q_id) if query_body.q_id else 0
         if query_body.rubric_link:
             # Read rubric notebook using the application's service account, not the logged-in user's credentials.
             notebook_content = await asyncio.to_thread(
