@@ -33,6 +33,7 @@ import logging
 import traceback
 import json
 import uuid
+import warnings
 from typing import Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -222,16 +223,15 @@ async def oauth_callback(request: Request):
 
     logging.info(f"Callback: Using authorization_response: {authorization_response[:100]}...")
 
-    # Fetch token - handle scope mismatch warnings gracefully
-    # Google may not grant all requested scopes (e.g., drive.readonly requires additional consent screen setup)
+    # Fetch token - suppress scope-mismatch warnings so they don't interrupt
+    # the token exchange.  Google may not grant all requested scopes (e.g.
+    # drive.readonly, gmail.send) and requests_oauthlib raises a Warning that
+    # can abort fetch_token before the access token is fully set on the session.
     try:
-        flow.fetch_token(authorization_response=authorization_response)
-    except Warning as w:
-        # Log the warning but continue - OAuth succeeded even if not all scopes were granted
-        logging.warning(f"OAuth scope warning (non-fatal): {w}")
-        # The flow.credentials are still valid even with the warning
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            flow.fetch_token(authorization_response=authorization_response)
     except Exception as e:
-        # Handle actual errors during token exchange
         logging.error(f"OAuth token exchange failed: {e}")
         traceback.print_exc()
         raise HTTPException(
@@ -239,7 +239,22 @@ async def oauth_callback(request: Request):
             detail=f"Failed to complete OAuth authentication: {str(e)}"
         )
 
-    flow_creds = flow.credentials
+    # Log which scopes were actually granted vs requested
+    granted = flow.oauth2session.token.get('scope', []) if flow.oauth2session.token else []
+    if granted:
+        logging.info(f"OAuth scopes granted: {granted}")
+        missing = set(config.SCOPES) - set(granted)
+        if missing:
+            logging.warning(f"OAuth scopes NOT granted (may need consent screen config): {missing}")
+
+    try:
+        flow_creds = flow.credentials
+    except ValueError as e:
+        logging.error(f"No access token after fetch_token: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="OAuth token exchange completed but no access token was received. Check client ID/secret configuration."
+        )
     # Store credentials and user info in the session.
     # In a real app, you might store credentials in a database linked to the user.
     request.session['credentials'] = credentials_to_dict(flow_creds)
