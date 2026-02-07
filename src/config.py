@@ -12,6 +12,7 @@ import os
 import sys
 import logging
 import traceback
+import urllib.parse
 
 from google.cloud import secretmanager
 from dotenv import load_dotenv
@@ -145,27 +146,32 @@ def load_app_config():
 
     # --- Construct configuration dictionaries ---
     firestore_key = firestore_key_raw.replace('\\n', '\n')
+    service_account_email = get_required_env("SERVICE_ACCOUNT_EMAIL")
+    firestore_client_id = get_required_env("FIRESTORE_CLIENT_ID")
+
+    # URL-encode the service account email for the cert URL
+    encoded_sa_email = urllib.parse.quote(service_account_email, safe='')
+
     firestore_cred_dict = {
         "type": "service_account",
         "project_id": project_id,
         "private_key_id": firestore_key_id,
         "private_key": firestore_key,
-        "client_email": "cp220-firestore@cp220-grading-assistant.iam.gserviceaccount.com",
-        "client_id": "101156988112383641306",
+        "client_email": service_account_email,
+        "client_id": firestore_client_id,
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/cp220-firestore%40cp220-grading-assistant.iam.gserviceaccount.com",
+        "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{encoded_sa_email}",
         "universe_domain": "googleapis.com"
     }
 
     # Build redirect URIs list
     default_redirect_uris = [
         "http://localhost:8080/callback",
-        "https://cp220-grader-api-622756405105.asia-south1.run.app/callback",
     ]
 
-    # Add custom redirect URI from environment if provided (e.g., ngrok URL)
+    # Add custom redirect URI from environment if provided (e.g., Cloud Run URL or ngrok URL)
     if oauth_redirect_uri:
         default_redirect_uris.append(oauth_redirect_uri)
 
@@ -182,10 +188,8 @@ def load_app_config():
     }
 
     # Determine the correct redirect URI based on production status and environment
-    if is_production:
-        redirect_uri_index = 1  # Use Cloud Run URL
-    elif oauth_redirect_uri:
-        redirect_uri_index = 2  # Use custom redirect URI (e.g., ngrok)
+    if oauth_redirect_uri:
+        redirect_uri_index = 1  # Use custom redirect URI (Cloud Run URL, ngrok, etc.)
     else:
         redirect_uri_index = 0  # Use localhost
 
@@ -262,12 +266,12 @@ session_service = DatabaseSessionService(
 
 # Create runners with the agents
 runner_assist = Runner(
-    app_name="CP220_2025_Grader_Agent_API",
+    app_name="ai_ta_teaching_agent",
     agent=root_agent,
     session_service=session_service
 )
 runner_score = Runner(
-    app_name="CP220_2025_Scoring_Agent_API",
+    app_name="ai_ta_scoring_agent",
     agent=scoring_agent,
     session_service=session_service
 )
