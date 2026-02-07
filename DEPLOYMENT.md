@@ -81,8 +81,6 @@ This builds the image in the cloud without needing local Docker.
 export PROJECT_ID=<your-project-id>
 export SERVICE_NAME=<your-service-name>
 
-# Build and push using Cloud Build
-gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME
 
 # Or use Artifact Registry (newer, recommended)
 gcloud builds submit --tag asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
@@ -96,13 +94,13 @@ export PROJECT_ID=<your-project-id>
 export SERVICE_NAME=<your-service-name>
 
 # Build the Docker image
-docker build -t gcr.io/$PROJECT_ID/$SERVICE_NAME .
+docker build -t asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME .
 
 # Configure Docker to use gcloud credentials
 gcloud auth configure-docker
 
 # Push the image
-docker push gcr.io/$PROJECT_ID/$SERVICE_NAME
+docker push asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 ```
 
 ## Step 4: Deploy to Cloud Run
@@ -115,7 +113,7 @@ export REGION=asia-south1
 
 # Deploy to Cloud Run
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
+  --image asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME\
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
@@ -140,7 +138,7 @@ gcloud run deploy $SERVICE_NAME \
 or if you have the env.yaml file then use 
 ```bash
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
+  --image asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME\
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
@@ -200,15 +198,15 @@ When you make code changes:
 
 ```bash
 # 1. Commit your changes to git
-git add .gcloud builds submit --tag asia-south1-docker.pkg.dev/ai-ta-486602/cloud-run-source-deploy/ai-ta
+git add .gcloud builds submit --tag asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 git commit -m "Your changes"
 git push
 
 # 2. Rebuild and redeploy
-gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME
+gcloud builds submit --tag asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
+  --image asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME \
   --region $REGION \
   --platform managed
 ```
