@@ -13,8 +13,6 @@ COPY . .
 
 # Set environment variables
 ENV PORT=8080
-ENV GOOGLE_CLOUD_PROJECT=ai-ta-486602
-ENV PRODUCTION=1
 
 # Run the application
 CMD ["python", "src/api_server.py"]
