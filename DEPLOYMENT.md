@@ -56,18 +56,27 @@ sed 's/=/: "/' .env | sed 's/$/"/' > env.yaml
 
 ## Step 2: Ensure Secrets are in Secret Manager
 
-Make sure all required secrets are stored in Google Cloud Secret Manager:
+Make sure all required secrets are stored in Google Cloud Secret Manager.
+The env var names below (left) point to the secret names you choose in Secret Manager (right):
 
-- `OAUTH_CLIENT_ID_KEY_NAME`
-- `OAUTH_CLIENT_SECRET_KEY_NAME`
-- `SIGNING_SECRET_KEY_NAME`
-- `FIRESTORE_PRIVATE_KEY_ID_KEY_NAME`
-- `FIRESTORE_PRIVATE_KEY_KEY_NAME`
-- `GEMINI_API_KEY_NAME`
+| Env Var | Description |
+|---------|-------------|
+| `OAUTH_CLIENT_ID_KEY_NAME` | OAuth 2.0 client ID |
+| `OAUTH_CLIENT_SECRET_KEY_NAME` | OAuth 2.0 client secret |
+| `SIGNING_SECRET_KEY_NAME` | HMAC key for signing sessions and JWT tokens |
+| `FIRESTORE_PRIVATE_KEY_ID_KEY_NAME` | Firestore service account key ID |
+| `FIRESTORE_PRIVATE_KEY_KEY_NAME` | Firestore service account private key |
+| `GEMINI_API_KEY_NAME` | Gemini API key |
 
-You can create/update secrets using:
+Create a secret:
 ```bash
-echo -n "your-secret-value" | gcloud secrets create SECRET_NAME --data-file=-
+echo -n "your-secret-value" | gcloud secrets create SECRET_NAME --project=$PROJECT_ID --data-file=-
+```
+
+**Generating the signing secret key** (used for session cookies and JWT tokens — any random 256-bit string):
+```bash
+echo -n "$(python3 -c 'import secrets; print(secrets.token_hex(32))')" | \
+  gcloud secrets create YOUR_SIGNING_SECRET_NAME --project=$PROJECT_ID --data-file=-
 ```
 
 ## Step 3: Build and Push Docker Image
