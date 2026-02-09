@@ -61,16 +61,17 @@ def get_user_list(db):
 
     return user_list
 
-def add_user_if_not_exists(db, google_user_id, user_name, user_email, google_user_name):
-    '''Add the user to the Firestore database if not already present.'''
-    user_list = get_user_list(db)
+def add_user_if_not_exists(db, course_id, google_user_id, user_name, user_gmail, google_user_name):
+    '''Add the user to the course's Students subcollection if not already present.
 
-    if google_user_id not in user_list:
-        logging.info(f"User '{user_name}' ({google_user_id}) not in database. Adding now.")
-        user_ref = db.collection(u'users').document(google_user_id)
-        user_ref.set({
+    Path: courses/{course_id}/Students/{google_user_id}
+    '''
+    student_ref = db.collection(u'courses').document(course_id).collection(u'Students').document(google_user_id)
+    if not student_ref.get().exists:
+        logging.info(f"Student '{user_name}' ({google_user_id}) not in course {course_id}. Adding now.")
+        student_ref.set({
             u'name': user_name,
-            u'email': user_email,
+            u'gmail': user_gmail,
             u'google_user_name': google_user_name
         })
 

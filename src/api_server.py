@@ -355,18 +355,22 @@ async def colab_auth(request: Request):
     Authenticate a Colab notebook user via their Google access token.
 
     Accepts a Google access token (from google.colab.auth.authenticate_user()),
-    verifies it with Google's userinfo API, and returns a JWT for the app.
+    verifies it with Google's userinfo API, registers the student under the
+    given course, and returns a JWT for the app.
 
     Request body:
-        {"google_token": "<access_token_from_colab>"}
+        {"google_token": "<access_token_from_colab>", "course_id": "<course_id>"}
 
     Returns:
         JSON with JWT token and user info
     """
     body = await request.json()
     google_token = body.get("google_token")
+    course_id = body.get("course_id")
     if not google_token:
         raise HTTPException(status_code=400, detail="Missing google_token in request body")
+    if not course_id:
+        raise HTTPException(status_code=400, detail="Missing course_id in request body")
 
     # Verify the token with Google's userinfo API
     try:
@@ -387,19 +391,19 @@ async def colab_auth(request: Request):
         raise HTTPException(status_code=502, detail="Failed to verify Google token with Google")
 
     user_id = user_data.get("id", "")
-    user_email = user_data.get("email", "")
+    user_gmail = user_data.get("email", "")
     user_name = user_data.get("name", "")
 
-    if not user_email:
+    if not user_gmail:
         raise HTTPException(status_code=401, detail="Could not retrieve email from Google token")
 
-    logging.info(f"Colab auth: verified user {user_name} ({user_email})")
+    logging.info(f"Colab auth: verified user {user_name} ({user_gmail}) for course {course_id}")
 
-    # Add user to Firestore if not already present
+    # Add student to the course's Students subcollection if not already present
     try:
-        add_user_if_not_exists(config.db, user_id, user_name, user_email, user_name)
+        add_user_if_not_exists(config.db, course_id, user_id, user_name, user_gmail, user_name)
     except Exception as e:
-        logging.error(f"Firestore error during colab_auth user creation: {e}")
+        logging.error(f"Firestore error during colab_auth student creation: {e}")
 
     # Generate JWT token
     token = create_jwt_token(user_data, config.signing_secret_key, expires_hours=24)
@@ -410,7 +414,7 @@ async def colab_auth(request: Request):
         "expires_in": 24 * 3600,
         "user": {
             "id": user_id,
-            "email": user_email,
+            "gmail": user_gmail,
             "name": user_name,
         }
     }
@@ -678,7 +682,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
         logging.info(f"google_user_name={google_user_name}, google_user_id={google_user_id}")
 
-        add_user_if_not_exists(config.db, google_user_id, user_name, user_email, google_user_name)
+        add_user_if_not_exists(config.db, query_body.course_id, google_user_id, user_name, user_email, google_user_name)
 
         add_answer_notebook(config.db, google_user_id, query_body.notebook_id, query_body.answer_notebook, answer_hash)
 
