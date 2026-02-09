@@ -305,9 +305,9 @@ async def oauth_callback(request: Request):
         traceback.print_exc()
         # Don't block login for database errors - user is already authenticated
 
-    return {"message": f"Hi {request.session['user']['name']} You have successfully logged in. Happy solving!"}
+    return RedirectResponse(url="/get_auth_token", status_code=302)
 
-@app.get("/get_auth_token", tags=["Authentication"])
+@app.get("/get_auth_token", tags=["Authentication"], response_class=HTMLResponse)
 async def get_auth_token(request: Request):
     """
     Generate a JWT token for authenticated user.
@@ -315,7 +315,7 @@ async def get_auth_token(request: Request):
     This token can then be used for API authentication from Colab notebooks.
 
     Returns:
-        JSON with JWT token and user info
+        HTML page with the JWT token for easy copying into Colab.
     """
     if 'user' not in request.session:
         raise HTTPException(
@@ -327,17 +327,26 @@ async def get_auth_token(request: Request):
 
     # Generate JWT token
     token = create_jwt_token(user_data, config.signing_secret_key, expires_hours=24)
+    user_name = user_data.get('name', '')
+    user_email = user_data.get('email', '')
 
-    return {
-        "token": token,
-        "token_type": "Bearer",
-        "expires_in": 24 * 3600,  # seconds
-        "user": {
-            "id": user_data.get('id'),
-            "email": user_data.get('email'),
-            "name": user_data.get('name')
-        }
-    }
+    html_content = f"""
+    <html>
+        <head><title>AI TA - Auth Token</title></head>
+        <body style="font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px;">
+            <h1>Welcome, {user_name}!</h1>
+            <p>You are logged in as <strong>{user_email}</strong>.</p>
+            <p>Paste the following token into your Colab notebook when prompted:</p>
+            <div style="position: relative;">
+                <textarea id="token" readonly rows="4" style="width: 100%; font-family: monospace; font-size: 13px; padding: 10px; word-break: break-all;">{token}</textarea>
+                <button onclick="navigator.clipboard.writeText(document.getElementById('token').value); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy Token', 2000)"
+                    style="margin-top: 8px; padding: 8px 20px; font-size: 14px; cursor: pointer;">Copy Token</button>
+            </div>
+            <p style="color: #666; font-size: 13px; margin-top: 20px;">This token expires in 24 hours. Visit this page again to get a new one.</p>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
 
 @app.get("/logout", tags=["Authentication"])
 async def logout(request: Request):
