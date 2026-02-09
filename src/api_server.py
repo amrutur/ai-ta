@@ -254,9 +254,10 @@ async def oauth_callback(request: Request):
             status_code=500,
             detail="OAuth token exchange completed but no access token was received. Check client ID/secret configuration."
         )
-    # Store credentials and user info in the session.
-    # In a real app, you might store credentials in a database linked to the user.
-    request.session['credentials'] = credentials_to_dict(flow_creds)
+    # Use credentials to fetch user info, but don't store the full OAuth
+    # credentials in the session cookie — they are large (token, refresh_token,
+    # client_secret, etc.) and can push the cookie past the browser's 4KB limit,
+    # causing "Failed to Load Session" on refresh.
 
     try:
         userinfo_service = build('oauth2', 'v2', credentials=flow_creds)
