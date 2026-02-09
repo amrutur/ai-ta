@@ -41,6 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 import uvicorn
+import requests as http_requests
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -347,6 +348,72 @@ async def get_auth_token(request: Request):
     </html>
     """
     return HTMLResponse(content=html_content, status_code=200)
+
+@app.post("/colab_auth", tags=["Authentication"])
+async def colab_auth(request: Request):
+    """
+    Authenticate a Colab notebook user via their Google access token.
+
+    Accepts a Google access token (from google.colab.auth.authenticate_user()),
+    verifies it with Google's userinfo API, and returns a JWT for the app.
+
+    Request body:
+        {"google_token": "<access_token_from_colab>"}
+
+    Returns:
+        JSON with JWT token and user info
+    """
+    body = await request.json()
+    google_token = body.get("google_token")
+    if not google_token:
+        raise HTTPException(status_code=400, detail="Missing google_token in request body")
+
+    # Verify the token with Google's userinfo API
+    try:
+        resp = http_requests.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {google_token}"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logging.error(f"Google userinfo API returned {resp.status_code}: {resp.text}")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Google token. Please re-authenticate in Colab."
+            )
+        user_data = resp.json()
+    except http_requests.RequestException as e:
+        logging.error(f"Failed to verify Google token: {e}")
+        raise HTTPException(status_code=502, detail="Failed to verify Google token with Google")
+
+    user_id = user_data.get("id", "")
+    user_email = user_data.get("email", "")
+    user_name = user_data.get("name", "")
+
+    if not user_email:
+        raise HTTPException(status_code=401, detail="Could not retrieve email from Google token")
+
+    logging.info(f"Colab auth: verified user {user_name} ({user_email})")
+
+    # Add user to Firestore if not already present
+    try:
+        add_user_if_not_exists(config.db, user_id, user_name, user_email, user_name)
+    except Exception as e:
+        logging.error(f"Firestore error during colab_auth user creation: {e}")
+
+    # Generate JWT token
+    token = create_jwt_token(user_data, config.signing_secret_key, expires_hours=24)
+
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": 24 * 3600,
+        "user": {
+            "id": user_id,
+            "email": user_email,
+            "name": user_name,
+        }
+    }
 
 @app.get("/logout", tags=["Authentication"])
 async def logout(request: Request):
