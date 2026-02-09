@@ -81,7 +81,7 @@ from email_service import send_email
 
 # --- FastAPI Application ---
 
-app = FastAPI(title="CP220-2025 Agent API")
+app = FastAPI(title="AI-TA Agent API")
 
 origins = [
     "http://localhost",
@@ -864,7 +864,7 @@ async def notify_student_grades_api(
 
             msg_body += json.dumps(grader_response, indent=4)
 
-            msg_body += "\n\nBest regards,\nCP220-2025 Grading Assistant"
+            msg_body += "\n\nBest regards,\nAI-TA Grading Assistant"
 
             logging.info(f"Instructor {current_user.get('email')} is sending email to {user_email} with subject '{subject}'")
 
@@ -929,7 +929,7 @@ async def notify_student_grades_api(
 
                                     msg_body = f"Hello {user_name},\n\n Your marks in {query_body.notebook_id} is {total_marks} out of {max_marks}. \n\nDetailed feedback for your submission"
                                     msg_body += json.dumps(grader_response, indent=4)
-                                    msg_body += "\n\nBest regards,\nCP220-2025 Grading Assistant"
+                                    msg_body += "\n\nBest regards,\nAI-TA Grading Assistant"
 
                                     # Send email
                                     email_sent = send_email(config.sendgrid_client, config.sendgrid_from_email, user_email, subject, msg_body)
