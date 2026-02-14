@@ -25,6 +25,11 @@ from google.adk.sessions import DatabaseSessionService
 
 from sendgrid import SendGridAPIClient
 
+from fastapi import HTTPException
+
+
+import agent
+
 
 # --- Logging Configuration ---
 
@@ -54,18 +59,20 @@ logging.getLogger("google.adk.agents").setLevel(logging.DEBUG)
 # --- Feature Flags ---
 # Controlled via /enable_tutor, /disable_tutor, /enable_eval, /disable_eval endpoints
 
-enable_assist = False
-active_eval_api = False
+#set to true to enable assist api
+isactive_tutor = True
+
+#set to true to enable eval api
+isactive_eval = False
 
 
 # --- Admin Emails ---
 
-admin_emails_env = os.environ.get('ADMIN_EMAILS', '')
-ADMIN_EMAILS = [email.strip() for email in admin_emails_env.split(',') if email.strip()]
+admin_email = os.environ.get('ADMIN_EMAIL', '').lower()
 
-if not ADMIN_EMAILS:
-    logging.warning("No admin emails configured. Set ADMIN_EMAILS environment variable with comma-separated email addresses.")
-
+if not admin_email:
+    logging.error("No admin email configured. Set ADMIN_EMAIL environment variable.")
+    raise HTTPException(status_code=500, detail="Server configuration error: No admin email  configured.")
 
 # --- OAuth Scopes ---
 
@@ -92,31 +99,32 @@ def access_secret_payload(project_id: str, secret_id: str, version_id: str = "la
         payload = response.payload.data.decode("UTF-8")
         return payload
     except Exception as e:
-        print(f"Error accessing secret: {e}", file=sys.stderr)
-        return None
+        logging.error(f"Error accessing secret: {e}")
+        raise HTTPException(status_code=500, detail=f"Error accessing secret '{secret_id}': {e}")
 
+# --- Helper functions for loading ---
+def get_required_env(var_name):
+    value = os.environ.get(var_name)
+    if not value:
+        logging.error(f"Error: Required environment variable '{var_name}' is not set.")
+        sys.exit(1)
+    return value
+
+
+def get_required_secret(project_id:str, key_name_env_var:str):
+    secret_name = get_required_env(key_name_env_var)
+    payload = access_secret_payload(project_id, secret_name)
+    if not payload:
+        logging.error(f"Error: Could not retrieve secret '{secret_name}' from Secret Manager for project '{project_id}'.")
+        sys.exit(1)
+    return payload
 
 def load_app_config():
     """Loads all configuration from environment variables and Secret Manager, then initializes services."""
     load_dotenv(interpolate=True)
 
-    # --- Helper functions for loading ---
-    def get_required_env(var_name):
-        value = os.environ.get(var_name)
-        if not value:
-            print(f"Error: Required environment variable '{var_name}' is not set.", file=sys.stderr)
-            sys.exit(1)
-        return value
 
     project_id = get_required_env("GOOGLE_CLOUD_PROJECT")
-
-    def get_required_secret(key_name_env_var):
-        secret_name = get_required_env(key_name_env_var)
-        payload = access_secret_payload(project_id, secret_name)
-        if not payload:
-            print(f"Error: Could not retrieve secret '{secret_name}' from Secret Manager for project '{project_id}'.", file=sys.stderr)
-            sys.exit(1)
-        return payload
 
     # --- Load all required values ---
     is_production = os.environ.get('PRODUCTION', '0') == '1'
@@ -128,17 +136,21 @@ def load_app_config():
     firestore_key_raw = get_required_secret('FIRESTORE_PRIVATE_KEY_KEY_NAME')
     # Gemini API key is optional — not needed when using Vertex AI with a service account
     gemini_api_key_name = os.environ.get('GEMINI_API_KEY_NAME', '')
+    sendgrid_from_email = os.environ.get('SENDGRID_FROM_EMAIL', '')    
+    sendgrid_api_key = ''
+    if not sendgrid_from_email:
+        logging.warning("SENDGRID_FROM_EMAIL environment variable not set. Email notifications will not work.")
+    else:
+        # Get SendGrid API key from Secret Manager
+        sendgrid_api_key = access_secret_payload(project_id, 'sendgrid-api-key')
+    bucket_name = os.environ.get('BUCKET_NAME',project_id+ '-bucket')    
     gemini_api_key = None
     if gemini_api_key_name:
         gemini_api_key = access_secret_payload(project_id, gemini_api_key_name)
         if not gemini_api_key:
-            print(f"Warning: Could not retrieve Gemini API key from secret '{gemini_api_key_name}'. "
-                  "Falling back to Vertex AI service account auth.", file=sys.stderr)
-
-    # Get SendGrid API key from Secret Manager
-    sendgrid_api_key = access_secret_payload(project_id, 'sendgrid-api-key')
-    if not sendgrid_api_key:
-        print("Warning: SendGrid API key not found. Email notifications will be disabled.", file=sys.stderr)
+            logging.warning(f"Could not retrieve Gemini API key from secret '{gemini_api_key_name}'. "
+                            "Falling back to Vertex AI service account auth.")
+    
 
     # Get OAuth redirect URI from environment (for development with ngrok)
     # If not set, use default based on production flag
@@ -147,9 +159,9 @@ def load_app_config():
     # --- Configure services ---
     if not is_production:
         os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-        print("Running in development mode. Insecure OAUTH callback enabled.")
+        logging.info("Running in development mode. Insecure OAUTH callback enabled.")
         if oauth_redirect_uri:
-            print(f"Using custom OAuth redirect URI: {oauth_redirect_uri}")
+            logging.info(f"Using custom OAuth redirect URI: {oauth_redirect_uri}")
 
     # --- Construct configuration dictionaries ---
     firestore_key = firestore_key_raw.replace('\\n', '\n')
@@ -201,10 +213,10 @@ def load_app_config():
         redirect_uri_index = 0  # Use localhost
 
     selected_redirect_uri = default_redirect_uris[redirect_uri_index]
-    print(f"OAuth Configuration:")
-    print(f"  Production mode: {is_production}")
-    print(f"  Selected redirect URI: {selected_redirect_uri}")
-    print(f"  Available redirect URIs: {default_redirect_uris}")
+    logging.info(f"OAuth Configuration:")
+    logging.info(f"  Production mode: {is_production}")
+    logging.info(f"  Selected redirect URI: {selected_redirect_uri}")
+    logging.info(f"  Available redirect URIs: {default_redirect_uris}")
 
     return {
         "project_id": project_id,
@@ -215,7 +227,9 @@ def load_app_config():
         "redirect_uri_index": redirect_uri_index,
         "gemini_api_key": gemini_api_key,
         "sendgrid_api_key": sendgrid_api_key,
-        "is_production": is_production
+        "bucket_name": bucket_name,
+        "is_production": is_production,
+        "sendgrid_from_email": sendgrid_from_email
     }
 
 
@@ -234,20 +248,20 @@ except Exception as e:
     sys.exit(1)
 
 # Initialize SendGrid email service
-sendgrid_from_email = os.environ.get('SENDGRID_FROM_EMAIL', '')
+_sendgrid_from_email = _config.get('send_grid_from_email')
 _sendgrid_api_key = _config.get('sendgrid_api_key')
 
-if _sendgrid_api_key and sendgrid_from_email:
+if _sendgrid_api_key and _sendgrid_from_email:
     try:
         sendgrid_client = SendGridAPIClient(_sendgrid_api_key)
-        logging.info(f"SendGrid email service initialized, sending as: {sendgrid_from_email}")
+        logging.info(f"SendGrid email service initialized, sending as: {_sendgrid_from_email}")
     except Exception as e:
         logging.error(f"Failed to initialize SendGrid service: {e}")
         sendgrid_client = None
 else:
     if not _sendgrid_api_key:
         logging.warning("SendGrid API key not found in Secret Manager (sendgrid-api-key). Email notifications will not work.")
-    if not sendgrid_from_email:
+    if not _sendgrid_from_email:
         logging.warning("SENDGRID_FROM_EMAIL not configured. Email notifications will not work.")
         logging.warning("Set SENDGRID_FROM_EMAIL environment variable to enable email notifications.")
     sendgrid_client = None
@@ -257,13 +271,13 @@ signing_secret_key = _config["signing_secret_key"]
 REDIRECT_URI_INDEX = _config["redirect_uri_index"]
 firestore_cred_dict = _config["firestore_cred_dict"]
 is_production = _config["is_production"]
+bucket_name = _config["bucket_name"]
 
 # Set Gemini API key if provided; otherwise Vertex AI uses service account auth
 if _config.get("gemini_api_key"):
     os.environ['GOOGLE_API_KEY'] = str(_config["gemini_api_key"])
 
 # Import agents
-import agent
 root_agent = agent.root_agent
 scoring_agent = agent.scoring_agent
 

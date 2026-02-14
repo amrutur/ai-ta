@@ -9,15 +9,18 @@ import logging
 import json
 import re
 from firebase_admin import firestore
+from google.api_core import exceptions as google_exceptions
+from fastapi import HTTPException
+from aita_exceptions import CourseNotFoundError, StudentNotEnrolledError, NotebookNotFoundError
+from typing import Any
 
-
-def _make_bucket_name(institution: str, academic_year: str, course_number: str) -> str:
-    '''Derive a GCS bucket name from institution, academic year, and course number.
+def make_course_handle(institution_id: str, term_id: str, course_id: str) -> str:
+    '''Derive a GCS folder name from institution, academic year, and course id.
 
     Concatenates the three values with hyphens, lowercased, with spaces and
-    special characters replaced to produce a valid GCS bucket name.
-    '''
-    raw = f"{institution}-{academic_year}-{course_number}"
+    special characters replaced to produce a valid folder name.
+    ''' 
+    raw = f"{institution_id}/{term_id}/{course_id}"
     # Lowercase, replace spaces/underscores with hyphens, strip non-alphanumeric except hyphens
     name = raw.lower()
     name = re.sub(r'[\s_]+', '-', name)
@@ -26,92 +29,239 @@ def _make_bucket_name(institution: str, academic_year: str, course_number: str) 
     name = re.sub(r'-+', '-', name).strip('-')
     return name
 
-
-def is_instructor_for_any_course(db, email: str) -> bool:
-    '''Check if the given email is an instructor or TA for any course.
-
-    Scans all course documents and checks the instructor_email and ta_email
-    fields (case-insensitive).
+async def update_course_info(db, course_handle:str, keyname: str, value: Any):
+    ''' Update course document's key to value in the Firestore database.
     '''
-    email_lower = email.lower()
-    courses_ref = db.collection(u'courses').stream()
-    for doc in courses_ref:
-        data = doc.to_dict()
-        if data.get('instructor_email', '').lower() == email_lower:
-            return True
-        if data.get('instructor_gmail', '').lower() == email_lower:
-            return True
-        ta_email = data.get('ta_email', '')
-        if ta_email and ta_email.lower() == email_lower:
-            return True
-        ta_gmail = data.get('ta_gmail', '')
-        if ta_gmail and ta_gmail.lower() == email_lower:
-            return True
-    return False
-
-
-def get_user_list(db):
-    '''Return the list of user IDs in the Firestore database.'''
-    users_ref = db.collection('users')
-    docs = users_ref.select([]).stream()
-    user_list = []
-
-    for doc in docs:
-        user_list.append(doc.id)
-
-    return user_list
-
-def add_user_if_not_exists(db, course_id, google_user_id, user_name, user_gmail, google_user_name):
-    '''Add the user to the course's Students subcollection if not already present.
-
-    Path: courses/{course_id}/Students/{google_user_id}
-    '''
-    student_ref = db.collection(u'courses').document(course_id).collection(u'Students').document(google_user_id)
-    if not student_ref.get().exists:
-        logging.info(f"Student '{user_name}' ({google_user_id}) not in course {course_id}. Adding now.")
-        student_ref.set({
-            u'name': user_name,
-            u'gmail': user_gmail,
-            u'google_user_name': google_user_name
-        })
-
-def add_answer_notebook(db, google_user_id, notebook_id, answer_notebook, answer_hash):
-    '''Add the answer notebook to the Firestore database.'''
     try:
-        answer_ref = db.collection(u'users').document(google_user_id).collection(u'notebooks').document(notebook_id)
-        answer_ref.set({
+        course = await db.collection(u'courses').document(course_handle).get()
+        if not course.exists:
+            raise CourseNotFoundError(course_handle)  
+        course.set({keyname: value, 'last_updated': firestore.SERVER_TIMESTAMP}, merge=True)      
+
+    except google_exceptions.NotFound:
+        logging.error("Firestore collection 'courses' not found.")
+        raise HTTPException(status_code=500, detail="Database access error.")
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
+
+
+async def get_student_list(db, course_handle: str):
+    '''Return the list of student gmails for the course_id in the Firestore database.'''
+    try:
+        courses_ref = db.collection(u'courses').document(course_handle)
+        course_doc = await courses_ref.get()
+        if not course_doc.exists:
+            raise CourseNotFoundError(course_handle)
+        students_ref = courses_ref.collection(u'Students')
+        students = await students_ref.select([]).stream()
+        student_list = []
+        for doc in students:
+            student_list.append(doc.id)
+
+    except google_exceptions.NotFound:
+        logging.error("Firestore collection 'courses' not found.")
+        raise HTTPException(status_code=500, detail="Database access error.")
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_id}")
+        raise HTTPException(status_code=404, detail=e.message)
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
+
+    return student_list
+
+async def add_student_if_not_exists(db, course_id, student_id, student_name):
+    '''Add the student to the course's Students subcollection if not already present.
+
+    Path: courses/{course_id}/Students/{student_id}
+    '''
+    try:
+        course_ref = db.collection(u'courses').document(course_id)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            logging.error(f"Course with ID '{course_id}' not found when trying to add student '{student_id}'.")
+            raise CourseNotFoundError(course_id)       
+        student_ref = course_ref.collection(u'Students').document(student_id)
+        student_doc = await student_ref.get()
+        if not student_doc.exists:
+            logging.info(f"Student '{student_id}' not in course {course_id}. Adding now.")
+            await student_ref.set({
+                u'name': student_name,
+                })
+    except google_exceptions.NotFound:
+        # Note: In Firestore, .get() on a non-existent ID usually returns 
+        # a 'doc.exists=False' snapshot rather than raising this error.
+        # But this is useful for missing Collections or wrong Database IDs.
+        logging.error(f"Firestore collection/resource not found.")
+        raise
+        
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_id}")
+        raise HTTPException(status_code=404, detail=e.message)
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
+    
+async def add_answer_notebook(db, course_id, student_id, student_name, notebook_id, answer_notebook, answer_hash):
+    '''Add the answer notebook to the student's record.'''
+    try:
+        course_ref = db.collection(u'courses').document(course_id)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            logging.error(f"Course with ID '{course_id}' not found when trying to add student '{student_id}'.")
+            raise CourseNotFoundError(course_id)       
+        student_ref = course_ref.collection(u'Students').document(student_id)
+        student_doc = await student_ref.get()
+        if not student_doc.exists:
+            logging.info(f"Student '{student_id}' not in course {course_id}. Adding now.")
+            await student_ref.set({
+                u'name': student_name,
+                })
+        notebook_ref = student_ref.collection(u'notebooks').document(notebook_id)
+        notebook_doc = await notebook_ref.get()
+        if notebook_doc.exists:
+            logging.warning(f"Notebook with ID '{notebook_id}' already exists for student '{student_id}' in course '{course_id}'. Overwriting the existing notebook.")
+
+        notebook_ref.set({
             u'answer_notebook': answer_notebook,
             u'answer_hash': answer_hash,
             u'submitted_at': firestore.SERVER_TIMESTAMP
         })
-    except Exception as e:
-        logging.error(f"Error adding answer notebook to Firestore: {e}")
+    except google_exceptions.NotFound:
+        # Note: In Firestore, .get() on a non-existent ID usually returns 
+        # a 'doc.exists=False' snapshot rather than raising this error.
+        # But this is useful for missing Collections or wrong Database IDs.
+        logging.error(f"Firestore collection/resource not found.")
+        raise
+        
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
 
-def update_marks(db, google_user_id, notebook_id, total_marks, max_marks, graded):
-    '''Update the marks for the answer notebook of google_user_id in the Firestore database.'''
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_id}")
+        raise HTTPException(status_code=404, detail=str(e)
+    except StudentNotEnrolledError as e:
+        logging.info(f"User '{user_gmail}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
+        raise HTTPException(status_code=403, detail=str(e)) 
+    except Exception as e:
+        logging.error(f"Error in  add_answer_notebook: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error while adding answer notebook.")
+
+async def update_marks(db, course_id, student_id, notebook_id, total_marks, max_marks, grader_response):
+    '''Update the marks for the answer notebook of student_id in the database.'''
     try:
-        answer_ref = db.collection(u'users').document(google_user_id).collection(u'notebooks').document(notebook_id)
-        answer_ref.set({
+        course_ref = db.collection(u'courses').document(course_id)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            logging.error(f"Course with ID '{course_id}' not found when trying to add user '{user_gmail}'.")
+            raise CourseNotFoundError(course_id)       
+        student_ref = course_ref.collection(u'Students').document(user_gmail)
+        student_doc = await student_ref.get()
+        if not student_doc.exists:
+            logging.error(f"Student '{student_id}' not in course {course_id}.")
+            raise StudentNotEnrolledError(student_id, course_id)
+        notebook_ref = student_ref.collection(u'notebooks').document(notebook_id)
+        notebook_doc = await notebook_ref.get()
+        if not notebook_doc.exists:
+            logging.error(f"Notebook with ID '{notebook_id}' not found for student '{student_id}' in course '{course_id}'.")
+            raise NotebookNotFoundError(notebook_id, student_id, course_id)    
+        await notebook_ref.set({
             u'total_marks': total_marks,
             u'max_marks': max_marks,
-            u'graded_at': firestore.SERVER_TIMESTAMP
+            u'graded_at': firestore.SERVER_TIMESTAMP,
         }, merge=True)
-        # Convert graded dict keys to strings for Firestore compatibility
-        # Firestore requires string keys in maps, but graded has integer keys (question numbers)
-        graded_with_string_keys = {str(k): v for k, v in graded.items()}
-        # Also update the graded details (using graded_json for dict/object type)
-        answer_ref.set({
-            u'graded_json': graded_with_string_keys
+        # Convert grader_response dict keys to strings for Firestore compatibility
+        # Firestore requires string keys in maps, but grader_response has integer keys (question numbers)
+        grader_response_with_string_keys = {str(k): v for k, v in grader_response.items()}
+        # Also update the grader_response details (using grader_response for dict/object type)
+        await notebook_ref.set({
+            u'grader_response': grader_response_with_string_keys
         }, merge=True)
+    except google_exceptions.NotFound:
+        # Note: In Firestore, .get() on a non-existent ID usually returns 
+        # a 'doc.exists=False' snapshot rather than raising this error.
+        # But this is useful for missing Collections or wrong Database IDs.
+        logging.error(f"Firestore collection/resource not found.")
+        raise
+        
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_id}")
+        raise HTTPException(status_code=404, detail=str(e)
+    except StudentNotEnrolledError as e:
+        logging.info(f"User '{user_gmail}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
+        raise HTTPException(status_code=403, detail=str(e)) 
+    except NotebookNotFoundError as e:
+        logging.info(f"User '{user_gmail}' tried to update marks for notebook '{notebook_id}' that does not exist.")
+        raise HTTPException(status_code=404, detail=str(e
     except Exception as e:
-        logging.error(f"Error updating marks in Firestore: {e}")
+        logging.error(f"Error in  update_marks: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error while updating marks.")
 
-def create_course(db, course_data: dict) -> str:
+async def does_course_exist(db, course_handle: str) -> dict:
+    '''Check if a course exists in the Firestore database.
+    Args:
+        db: Firestore client
+        course_handle: The unique handle for the course (institution_id/term_id/course_id)
+    Returns:
+        The course document if it exists, None otherwise.
+    '''
+    try:
+        course_ref = db.collection(u'courses').document(course_handle)
+        course_doc = await course_ref.get()
+        if course_doc.exists:
+            return course_doc                raise HTTPException(status_code=404, detail=f"Graded response for notebook '{notebook_id}' for student '{student_id}' not found. This may be because the notebook has not been graded yet, or because the grading data is in an older format."
+
+        else:
+            return None
+    except Exception as e:
+        logging.error(f"Error checking if course exists: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while checking if the course exists.")
+
+async def create_course(db, course_data: dict) -> bool:
     '''Create a new course in the Firestore database.
-
-    Uses Firestore auto-generated document IDs so that multiple courses
-    with the same course_number (across different institutions) can coexist.
-
     Args:
         db: Firestore client
         course_data: Dictionary with course fields (course_name, course_number,
@@ -120,88 +270,103 @@ def create_course(db, course_data: dict) -> str:
             ta_email, ta_gmail)
 
     Returns:
-        The auto-generated course document ID
+        True if course was created successfully (or already exists), False otherwise.
     '''
-    bucket_name = _make_bucket_name(
-        course_data['institution'],
-        course_data['academic_year'],
-        course_data['course_number'],
+    course_handle = make_course_handle(
+        course_data['institution_id'],
+        course_data['term_id'],
+        course_data['course_id'],
     )
 
-    doc = {
-        u'course_name': course_data['course_name'],
-        u'course_number': course_data['course_number'],
-        u'academic_year': course_data['academic_year'],
-        u'institution': course_data['institution'],
-        u'instructor_email': course_data['instructor_email'],
-        u'instructor_gmail': course_data['instructor_gmail'],
-        u'instructor_name': course_data['instructor_name'],
-        u'start_date': course_data['start_date'],
-        u'end_date': course_data['end_date'],
-        u'bucket_name': bucket_name,
-        u'created_at': firestore.SERVER_TIMESTAMP,
-    }
+    try: 
+        course_ref = db.collection(u'courses').document(course_handle)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            await course_ref.set(course_data)
+            logging.info(f"Created course {course_data['course_id']} with handle: {course_handle}")
+        else:
+            logging.warning(f"Course with handle '{course_handle}' already exists. Skipping creation.")
+        return True
 
-    # Add optional TA fields if provided
-    if course_data.get('ta_name'):
-        doc[u'ta_name'] = course_data['ta_name']
-    if course_data.get('ta_email'):
-        doc[u'ta_email'] = course_data['ta_email']
-    if course_data.get('ta_gmail'):
-        doc[u'ta_gmail'] = course_data['ta_gmail']
-
-    # Use add() to let Firestore generate a unique document ID
-    _, course_ref = db.collection(u'courses').add(doc)
-    course_id = course_ref.id
-    logging.info(f"Created course '{course_data['course_name']}' ({course_data['course_number']}) with ID: {course_id}, bucket: {bucket_name}")
-    return course_id, bucket_name
+    except google_exceptions.GoogleAPICallError as e:
+        logging.error(f"Failed to create course in Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while creating course: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while creating the course.")
+    
+    return False
 
 
-def fetch_grader_response(db, notebook_id: str = None, user_email: str = None):
+async def fetch_grader_response(db, course_handle:str, notebook_id: str = None, student_id: str = None)-> dict:
     '''
-    Get the graded answer for the student user_email for notebook_id in the Firestore database.
+    Get the graded answer for the student_id for notebook_id in the Firestore database.
     '''
-    logging.debug(f"Fetching grader response for email: {user_email} and notebook_id: {notebook_id}")
-
     try:
-        user_list = get_user_list(db)
-        grader_response = {}
+        course_ref = db.collection(u'courses').document(course_handle)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            logging.error(f"Course with handle '{course_handle}' not found when trying to fetch grader response.")
+            raise CourseNotFoundError(course_handle)    
+
+        grader_response = {}    
 
         if notebook_id is None:
             logging.error(f"notebook_id is None")
             return None
-        for user_id in user_list:
-            answer_ref = db.collection(u'users').document(user_id).collection(u'notebooks').document(notebook_id)
-            userinfo_ref = db.collection(u'users').document(user_id)
-            logging.debug(f"Fetched userinfo_ref for {user_email}")
-            userinfo_doc = userinfo_ref.get()
-            logging.debug(f"Fetched userinfo_doc for {userinfo_doc.get('name')} with {userinfo_doc.get('email')} ")
-            answer_doc = answer_ref.get()
-            logging.debug(f"Checking user: {userinfo_doc.get('name')} with {userinfo_doc.get('email')} ")
-            if re.match(f"{user_email}", userinfo_doc.get('email'), re.IGNORECASE) is None:
-                logging.debug(f"No match for email {user_email} and {userinfo_doc.get('email')}")
-                continue
-            logging.debug(f"Found matching user: {userinfo_doc.get('name')} with {userinfo_doc.get('email')} ")
+        
+        student_ref = course_ref.collection(u'Students').document(student_id)
+        student_doc = await student_ref.get()
 
-            user_name = userinfo_doc.get('name')
-            logging.debug(f"Fetching graded response for user: {user_name} and notebook_id: {notebook_id}")
-            response_json = answer_doc.to_dict()
+        if not student_doc.exists:
+            logging.warning(f"Student '{student_id}' not found in course {course_handle} when trying to fetch grader response.")
+            raise StudentNotEnrolledError(student_id, course_handle)
+    
+        answer_ref = student_ref.collection(u'Notebooks').document(notebook_id)
+        answer_doc = await answer_ref.get()
+        if not answer_doc.exists:
+            logging.warning(f"Notebook{notebook_id} for student '{student_id}' in course '{course_handle}' not found. Creating one to give zero marks")
 
-            # Try to get graded_json (new format), fall back to graded (old format) for backward compatibility
-            graded_data = response_json.get('graded_json')
-            if graded_data is None:
-                # Backward compatibility: try old 'graded' field (JSON string)
-                graded_string = response_json.get('graded')
-                if graded_string:
-                    graded_data = json.loads(graded_string)
+        answer_doc = answer_doc.to_dict()
 
-            logging.debug(f"user:{user_name} : total marks: {response_json.get('total_marks')} Response json: {graded_data}")
+        graded_json = answer_doc.get('graded_json', None)
 
-            grader_response = {'user_name': user_name, 'total_marks': response_json.get('total_marks'), 'max_marks': response_json.get('max_marks')}
+        if graded_json is None:
+            logging.warning(f"Graded response for notebook '{notebook_id}' for student '{student_id}' in course '{course_handle}' not found. This may be because the notebook has not been graded yet, or because the grading data is in an older format. Returning None for this student's response.")
+            return None
 
-            grader_response['feedback'] = graded_data
-            logging.debug(f"For  matching user, response is: {grader_response}")
-            break
+        logging.debug(f"student_id: {student_id} : total marks: {answer_doc.get('total_marks')} Response json: {graded_json}")
+
+        grader_response = {'student_id': student_id, 'total_marks': answer_doc.get('total_marks'), 'max_marks': answer_doc.get('max_marks')}
+        grader_response['feedback'] = graded_json
+
         return grader_response
+    except google_exceptions.NotFound:
+        # Note: In Firestore, .get() on a non-existent ID usually returns 
+        # a 'doc.exists=False' snapshot rather than raising this error.
+        # But this is useful for missing Collections or wrong Database IDs.
+        logging.error(f"Firestore collection/resource not found.")
+        raise
+        
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_id}")
+        raise HTTPException(status_code=404, detail=str(e)
+    except StudentNotEnrolledError as e:
+        logging.info(f"User '{user_gmail}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
+        raise HTTPException(status_code=403, detail=str(e)) 
+    except NotebookNotFoundError as e:
+        logging.info(f"User '{user_gmail}' tried to update marks for notebook '{notebook_id}' that does not exist.")
+        raise HTTPException(status_code=404, detail=str(e)
     except Exception as e:
-        logging.error(f"Error in fetch_grader_response: {e}")
+        logging.error(f"Error in  update_marks: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error while updating marks.")

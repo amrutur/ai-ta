@@ -97,6 +97,39 @@ async def score_question(question: str, answer: str, rubric: str, runner: Runner
 
     return marks, response_text
 
+async def get_rubric_answers(rubric_cells:list) -> dict:
+    '''
+    Extract the rubric answers from the rubric notebook cells.
+
+    Args:
+        q_id: The question ID to find the rubric answer for
+        rubric_cells: The list of cells from the rubric notebook
+    Returns:
+        The rubric answers as a dict with question num as key and answer content as value, or an empty dict if not found.
+    '''
+    answers = {}
+    i=0
+    while i < len(rubric_cells):
+        content=''.join(rubric_cells[i]['source'])
+        match = re.search(r"\*\*\s*Q(\d+)",content)
+        if match: 
+            #this is a question cell. All cells following this till next question cell or end are the answers
+            qnum = int(match.group(1))
+            for j in range(i+1, len(rubric_cells)):
+                content=''.join(rubric_cells[j]['source'])
+                qpat = r"\*\*\s*Q(\d+)"
+                if re.search(qpat,content):
+                    #this is the next question cell, so break
+                    break
+                else:
+                    if qnum not in answers:
+                        answers[qnum] = content
+                    else:
+                        answers[qnum] += content
+            i = j
+        else:
+            i += 1
+    return answers
 
 async def evaluate(answer_json, rubric_json, runner: Runner, session_service: DatabaseSessionService, user_id: str) -> tuple[float, float, int, dict]:
     '''Evaluate the submitted notebook by grading all questions using the scoring agent.'''
@@ -164,3 +197,28 @@ async def evaluate(answer_json, rubric_json, runner: Runner, session_service: Da
     except Exception as e:
         print(f"Error during evaluation: {e}", file=sys.stderr)
         traceback.print_exc()
+
+async def get_rubric(rubric_link: str, service_account_info: dict) -> dict:
+    '''
+    Load the rubric notebook from Google Drive using the service account.
+
+    Args:
+        rubric_link: The shareable link to the rubric notebook
+        service_account_info: The service account credentials
+    '''
+    from drive_utils import load_notebook_from_google_drive_sa, extract_file_id_from_share_link
+    file_id = extract_file_id_from_share_link(rubric_link)
+    if not file_id:
+        raise HTTPException(status_code=400, detail="Invalid rubric link provided.")
+    rubric_notebook = await asyncio.to_thread(
+                load_notebook_from_google_drive_sa, service_account_info, rubric_link)
+
+    if not rubric_notebook:
+        raise HTTPException(status_code=500, detail="Failed to load rubric notebook from Google Drive.")
+    try:    
+        import nbformat
+        rubric_notebook = nbformat.reads(rubric_notebook, as_version=4)
+        return rubric_notebook
+    except Exception as e:
+        logging.error(f"Error parsing rubric notebook content: {e}")
+        raise HTTPException(status_code=500, detail="Failed to parse rubric notebook content.")

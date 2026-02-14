@@ -13,7 +13,7 @@ from jwt.exceptions import InvalidTokenError
 from fastapi import HTTPException, Request
 
 import config
-from database import is_instructor_for_any_course
+from database import is_instructor
 
 
 def credentials_to_dict(credentials):
@@ -106,7 +106,7 @@ def get_current_user(request: Request) -> Dict[str, Any]:
     if 'user' not in request.session:
         raise HTTPException(
             status_code=401,
-            detail="User not authenticated. Please login first at /login or provide a valid Authorization token"
+            detail="User not authenticated. Please login first at /colab_auth or provide a valid Authorization token"
         )
     return request.session['user']
 
