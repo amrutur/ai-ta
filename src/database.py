@@ -52,6 +52,31 @@ async def update_course_info(db, course_handle:str, keyname: str, value: Any):
         logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
 
+async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict):
+    ''' Save the rubric information to the Firestore database under a Rubrics subcollection.
+    '''
+    try:
+        rubric_ref = db.collection(u'courses').document(course_handle).collection(u'Rubrics').document(notebook_id)
+        await rubric_ref.set({
+            u'max_marks': max_marks,
+            u'context': context,
+            u'questions': questions,
+            u'answers': answers,
+            u'last_updated': firestore.SERVER_TIMESTAMP
+        })
+    except google_exceptions.NotFound:
+        logging.error("Firestore collection 'courses' not found.")
+        raise HTTPException(status_code=500, detail="Database access error.")
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in save_rubric: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while saving the rubric.")
 
 async def get_student_list(db, course_handle: str):
     '''Return the list of student gmails for the course_id in the Firestore database.'''
@@ -78,7 +103,7 @@ async def get_student_list(db, course_handle: str):
         raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
     except CourseNotFoundError as e:
         # Catching your own custom exception raised inside the try block
-        logging.info(f"User requested non-existent course: {course_id}")
+        logging.info(f"User requested non-existent course: {course_handle}")
         raise HTTPException(status_code=404, detail=e.message)
     except Exception as e:
         logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
@@ -172,9 +197,9 @@ async def add_answer_notebook(db, course_id, student_id, student_name, notebook_
     except CourseNotFoundError as e:
         # Catching your own custom exception raised inside the try block
         logging.info(f"User requested non-existent course: {course_id}")
-        raise HTTPException(status_code=404, detail=str(e)
+        raise HTTPException(status_code=404, detail=str(e))
     except StudentNotEnrolledError as e:
-        logging.info(f"User '{user_gmail}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
+        logging.info(f"User '{student_id}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
         raise HTTPException(status_code=403, detail=str(e)) 
     except Exception as e:
         logging.error(f"Error in  add_answer_notebook: {e}")
@@ -186,9 +211,9 @@ async def update_marks(db, course_id, student_id, notebook_id, total_marks, max_
         course_ref = db.collection(u'courses').document(course_id)
         course_doc = await course_ref.get()
         if not course_doc.exists:
-            logging.error(f"Course with ID '{course_id}' not found when trying to add user '{user_gmail}'.")
+            logging.error(f"Course with ID '{course_id}' not found when trying to add user '{student_id}'.")
             raise CourseNotFoundError(course_id)       
-        student_ref = course_ref.collection(u'Students').document(user_gmail)
+        student_ref = course_ref.collection(u'Students').document(student_id)
         student_doc = await student_ref.get()
         if not student_doc.exists:
             logging.error(f"Student '{student_id}' not in course {course_id}.")
@@ -229,18 +254,18 @@ async def update_marks(db, course_id, student_id, notebook_id, total_marks, max_
     except CourseNotFoundError as e:
         # Catching your own custom exception raised inside the try block
         logging.info(f"User requested non-existent course: {course_id}")
-        raise HTTPException(status_code=404, detail=str(e)
+        raise HTTPException(status_code=404, detail=str(e))
     except StudentNotEnrolledError as e:
-        logging.info(f"User '{user_gmail}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
+        logging.info(f"User '{student_id}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
         raise HTTPException(status_code=403, detail=str(e)) 
     except NotebookNotFoundError as e:
-        logging.info(f"User '{user_gmail}' tried to update marks for notebook '{notebook_id}' that does not exist.")
-        raise HTTPException(status_code=404, detail=str(e
+        logging.info(f"User '{student_id}' tried to update marks for notebook '{notebook_id}' that does not exist.")
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logging.error(f"Error in  update_marks: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error while updating marks.")
 
-async def does_course_exist(db, course_handle: str) -> dict:
+async def get_course_data(db, course_handle: str) -> dict:
     '''Check if a course exists in the Firestore database.
     Args:
         db: Firestore client
@@ -252,10 +277,10 @@ async def does_course_exist(db, course_handle: str) -> dict:
         course_ref = db.collection(u'courses').document(course_handle)
         course_doc = await course_ref.get()
         if course_doc.exists:
-            return course_doc                raise HTTPException(status_code=404, detail=f"Graded response for notebook '{notebook_id}' for student '{student_id}' not found. This may be because the notebook has not been graded yet, or because the grading data is in an older format."
-
+            return course_doc.to_dict()            
         else:
-            return None
+            logging.info(f"Course with handle '{course_handle}' not found.")
+            return None  
     except Exception as e:
         logging.error(f"Error checking if course exists: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while checking if the course exists.")
@@ -359,14 +384,14 @@ async def fetch_grader_response(db, course_handle:str, notebook_id: str = None, 
 
     except CourseNotFoundError as e:
         # Catching your own custom exception raised inside the try block
-        logging.info(f"User requested non-existent course: {course_id}")
-        raise HTTPException(status_code=404, detail=str(e)
+        logging.info(f"User requested non-existent course: {course_handle}")
+        raise HTTPException(status_code=404, detail=str(e))
     except StudentNotEnrolledError as e:
-        logging.info(f"User '{user_gmail}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
+        logging.info(f"User '{student_id}' tried to submit notebook for course '{course_handle}' they are not enrolled in.")
         raise HTTPException(status_code=403, detail=str(e)) 
     except NotebookNotFoundError as e:
-        logging.info(f"User '{user_gmail}' tried to update marks for notebook '{notebook_id}' that does not exist.")
-        raise HTTPException(status_code=404, detail=str(e)
+        logging.info(f"User '{student_id}' tried to update marks for notebook '{notebook_id}' that does not exist.")
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logging.error(f"Error in  update_marks: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error while updating marks.")

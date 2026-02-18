@@ -10,6 +10,8 @@ import logging
 import traceback
 import re
 import uuid
+import asyncio
+
 
 from fastapi import HTTPException
 from google.adk import Runner

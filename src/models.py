@@ -20,14 +20,16 @@ class QueryResponse(BaseModel):
     response: str
 
 class AssistRequest(BaseModel):
-    query: str
     qnum: int
+    context: str
+    question: str
+    answer: str
+    output: Dict[str,Any]
+    ta_chat: str
     notebook_id: str
-    student_id: str
-    course_id: str
-    term_id: str 
     institution_id: str
-    rubric_link: AnyUrl | None = None
+    term_id: str
+    course_id: str
 
 class AssistResponse(BaseModel):
     response: str
@@ -59,35 +61,45 @@ class GradeResponse(BaseModel):
     marks: float
 
 class EvalRequest(BaseModel):
-    answer_notebook: Dict[str, Any]
-    answer_hash: str
-    rubric_link: AnyUrl
     notebook_id: str
-    student_id: str
-    course_id: str
-    term_id: str
+    context: Dict[str,Any]
+    questions: Dict[str,Any]
+    answers: Dict[str,Any]    
+    outputs: Dict[str,Any]
     institution_id: str
+    term_id: str
+    course_id: str
 
 class EvalResponse(BaseModel):
     response: str
-    marks: float
 
 class FetchGradedRequest(BaseModel):
     notebook_id: str
     student_id: str
-    course_id: str
-    term_id: str
     institution_id: str
+    term_id: str
+    course_id: str
 
 class FetchGradedResponse(BaseModel):
     grader_response: Dict[str, Any] | None = None
 
+class FetchMarksListRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+
+class FetchMarksListResponse(BaseModel):
+    max_marks: float | None = None
+    marks_list: Dict[str, Any] | None = None
+
+
 class NotifyGradedRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
     notebook_id: str
     student_id: str
-    course_id: str
-    term_id: str
-    institution_id: str
 
 class NotifyGradedResponse(BaseModel):
     response: str
@@ -122,14 +134,16 @@ class ListResponse(BaseModel):
     listname: list[str]
 
 class AddRubricRequest(BaseModel):
-    rubric_context: Dict[str,Any]
-    rubric_questions: Dict[str,Any]
-    rubric_answers: Dict[str,Any]    
     notebook_id: str
-    course_id: str
-    term_id: str
+    max_marks: float
+    context: Dict[str,Any]
+    questions: Dict[str,Any]
+    answers: Dict[str,Any]
+    outputs: Dict[str,Any]  
     institution_id: str
-
+    term_id: str
+    course_id: str
+ 
 class AddRubricResponse(BaseModel):
     response: str
 

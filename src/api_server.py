@@ -57,12 +57,13 @@ from models import (
     NotifyGradedRequest, NotifyGradedResponse,
     TutorInteractionRequest, TutorInteractionResponse,
     CreateCourseRequest, CreateCourseResponse,
+    FetchMarksListRequest, FetchMarksListResponse,
+    AddRubricRequest, AddRubricResponse
 )
 from auth import (
     credentials_to_dict,
     create_jwt_token,
     get_current_user,
-    get_instructor_user,
     get_admin_user,
 )
 from database import (
@@ -74,8 +75,10 @@ from database import (
     update_marks,
     fetch_grader_response,
     create_course,
-    is_instructor_for_any_course,
-    make_course_handle
+    make_course_handle,
+    save_rubric,
+    get_marks_list,
+    get_course_data
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from agent_service import run_agent_and_get_response, score_question, evaluate
@@ -472,27 +475,11 @@ async def assist(query_body: AssistRequest, request: Request):
                     session_id=session_id
                 )
 
-        rubric = ''
-        qnum = query_body.qnum
-        if query_body.rubric_link:
-            # Read rubric notebook using the application's service account, not the logged-in user's credentials. First check the cache
-            rubric_json = courses[course_handle].get(query_body.rubric_link, {})
-            if rubric_json is None:
-
-                rubric = await asyncio.to_thread(
-                load_notebook_from_google_drive_sa, config.firestore_cred_dict, str(query_body.rubric_link)
-                if rubric is None:
-                raise HTTPException(
-                    status_code=404, detail=f"Rubric notebook '{query_body.rubric_link}' not found. Ensure it is shared with the service account: {config.firestore_cred_dict.get('client_email')}"
-                )
-                try:
-                    # .ipynb files are JSON, so we can return them as JSON
-                    rubric_json = json.loads(notebook_content)
-                except json.JSONDecodeError:
-                    # Or return as plain text if it's not valid JSON for some reason
-                    return HTMLResponse(content=f"<pre>Could not parse rubric notebook as JSON. Raw content:\n\n{notebook_content}</pre>")
-            )
-            rubric =  "{The rubric is} " + ''.join(rubric_json['cells'][qnum+1]['source'])
+        if query_body.notebook_id in courses[course_handle].notebooks:
+            qnum = query_body.qnum
+            answer = courses[course_handle][query_body.notebook_id]['answers'].get(str(qnum))
+            if answer is not None:
+                rubric =  "{The rubric is} " + answer
 
         # Create a message from the query
         content = types.Content(
@@ -501,7 +488,7 @@ async def assist(query_body: AssistRequest, request: Request):
         )
 
         # Attempt to get the response using the current session ID
-        response_text = await run_agent_and_get_response(session_id, user_id, content, runner)
+        response_text = await run_agent_and_get_response(session_id, student_gmail, content, runner)
 
         if not response_text:
             raise HTTPException(status_code=500, detail="Failed to generate response")
@@ -912,36 +899,36 @@ async def enable_eval(
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
-@app.post("/fetch_student_list")
-async def fetch_student_list_api(
-    query_body: TutorInteractionRequest,
+@app.post("/fetch_marks_list", response_model=FetchMarksListResponse)
+async def fetch_marks_list_api(
+    query_body: FetchMarksListRequest,
     request: Request
 ):
     '''
-    Fetch the list of students from the database.
-    Returns a dictionary of user_id to name and email.
+    Fetch the list of students and marks.
     This endpoint is only accessible to instructors.
     '''
     user = get_current_user(request)
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
-    logging.info(f"Instructor {current_user.get('email')} is fetching student list")
+    logging.info(f"{user.get('email')} is fetching student list")
 
     try:
         user_gmail = user.get('email', '').lower()
         if not is_authorized(user_gmail, course_handle) :
             raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin")
 
-        student_list = await get_student_list(config.db, course_handle)
-        logging.info(f"Found {len(student_list)} students in course {course_handle}")
+        max_marks, marks_list = await get_marks_list(config.db, course_handle, notebook_id=query_body.notebook_id)
+        logging.info(f"Found {len(marks_list)} students in course {course_handle}")
 
-        return TutorInteractionResponseResponse(
-            response=student_list
+        return FetchMarksListResponse(
+            max_marks=max_marks,
+            marks_list=marks_list
         )
 
     except Exception as e:
         # By logging the exception with its traceback, you can see the root cause in your server logs.
-        logging.error("An exception occurred during fetch_student_list_api: %s", e)
+        logging.error("An exception occurred during fetch_marks_list_api: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
@@ -1019,7 +1006,7 @@ async def notify_student_grades_api(
         total_marks = grader_response.get('total_marks', 0)
         max_marks = grader_response.get('max_marks', 0)
         subject = f"Graded Response for your submission {query_body.notebook_id}"
-        msg_body = f"Hello {user_name},\n\n Your marks in {query_body.notebook_id} is {total_marks} out of {max_marks}. \n\nDetailed feedback for your submission"
+        msg_body = f"Hello {student_id},\n\n Your marks in {query_body.notebook_id} is {total_marks} out of {max_marks}. \n\nDetailed feedback for your submission"
 
         msg_body += json.dumps(grader_response, indent=4)
 
@@ -1031,7 +1018,7 @@ async def notify_student_grades_api(
 
         if email_sent:
             return NotifyGradedResponse(
-                response=f"Successfully sent email to {user_email} with graded response."
+                response=f"Successfully sent email to {student_id} with graded response."
             )
         else:
             raise HTTPException(
@@ -1064,25 +1051,20 @@ async def upload_rubric_api(
 
     user = get_current_user(request)
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
-    rubric_notebook = query_body.rubric_notebook
     try:
         user = get_current_user(request)
         user_gmail = user.get('email', '').lower()
         if not is_authorized(user_gmail, course_handle) :
-            raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin")
+            raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin. Is not allowed to upload rubric")
 
-        #extract the cells from the notebook
-        if ('ipynb' in rubric_notebook): #remove one hierarchy if present
-            rubric_notebook = rubric_notebook['ipynb']
+        #Save the in the cache
+        courses[course_handle][query_body.notebook_id]={'context':query_body.context,
+                                             'questions':query_body.questions,
+                                             'max_marks': query_body.max_marks,
+                                             'answers':query_body.answers} 
 
-        rubric_cells = rubric_notebook['cells'] if 'cells' in rubric_notebook else []
-        logging.debug(f"Number of rubric cells: {len(rubric_cells)}")
-        if len(rubric_cells) == 0:
-            logging.debug(f"rubric_notebook={rubric_notebook}")
-            raise HTTPException(status_code=400, detail="No cells found in the rubric notebook")
-
-        # Parse and Save the rubric to the database and in the cache
-        courses[course_handle][notebook_id]= parse_and_save_rubric(config.db, course_handle, query_body, rubric_cells)
+        #now save the rubric in the databse as well
+        save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers)
 
         return AddRubricResponse(
             response=f"Successfully added rubric '{query_body.rubric_name}' to course '{course_handle}'"
@@ -1106,9 +1088,9 @@ async def create_course_api(
 
         course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
-        course_doc = does_course_exist(config.db, course_handle)
-        if course_doc:
-            courses[course_handle] = course_doc.to_dict()
+        course_data = get_course_data(config.db, course_handle)
+        if course_data is not None:
+            logging.info(f"Course '{course_handle}' already exists. No new course created.")
             return CreateCourseResponse(
                 response=f"Course '{course_handle}' already exists. No new course created."
             )
@@ -1117,7 +1099,7 @@ async def create_course_api(
         courses[course_handle] = {
             'course_id': query_body.course_id,
             'term_id': query_body.term_id,
-            'institution_id': query_body.institution_id
+            'institution_id': query_body.institution_iddoes_course_exist
         }
 
 
@@ -1159,10 +1141,10 @@ async def create_course_api(
         courses[course_handle]['isactive_eval']= False
 
         if create_course(config.db, courses[course_handle]):
-            logging.info(f"Admin {current_user.get('email')} created course '{query_body.course_name}' ({courses[course_handle]['course_id']})")
+            logging.info(f"Admin {current_user.get('email')} created course {query_body.course_name} ({courses[course_handle]['course_id']})")
 
             return CreateCourseResponse(
-                response=f"Course '{courses[course_handle]['institution_id']}'/'{courses[course_handle]['term_id']}'/'{courses[course_handle]['course_id']}') created successfully."
+                response=f"Course {courses[course_handle]['institution_id']}/{courses[course_handle]['term_id']}/{courses[course_handle]['course_id']} created successfully."
             )
         else:
             raise HTTPException(status_code=422, detail=f"Could not create course '{courses[course_handle]['course_id']}' for institution '{courses[course_handle]['institution_id']}' and term '{courses[course_handle]['term_id']}'.")

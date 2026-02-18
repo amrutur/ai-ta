@@ -110,23 +110,6 @@ def get_current_user(request: Request) -> Dict[str, Any]:
         )
     return request.session['user']
 
-def get_instructor_user(request: Request) -> Dict[str, Any]:
-    """
-    Dependency to verify the current user is an instructor or TA for at least
-    one course. Instructor/TA emails are configured per-course in Firestore.
-    """
-    user = get_current_user(request)
-
-    user_email = user.get('email', '').lower()
-
-    if not is_instructor_for_any_course(config.db, user_email):
-        raise HTTPException(
-            status_code=403,
-            detail="Access forbidden. This endpoint is only available to instructors."
-        )
-
-    return user
-
 def get_admin_user(request: Request) -> Dict[str, Any]:
     """
     Dependency to verify the current user is a platform administrator.
