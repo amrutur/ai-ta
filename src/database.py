@@ -39,7 +39,7 @@ async def load_course_info_from_db(db) -> dict:
     try:
         courses_ref = db.collection(u'courses')
         docs = courses_ref.stream()
-        async for doc in docs:
+        for doc in docs:
             all_courses[doc.id] = doc.to_dict()
         logging.info(f"Loaded {len(all_courses)} courses from Firestore")
     except Exception as e:
