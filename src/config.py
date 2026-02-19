@@ -241,7 +241,7 @@ _config = load_app_config()
 try:
     cred = credentials.Certificate(_config["firestore_cred_dict"])
     firebase_admin.initialize_app(cred)
-    db = firestore.client(database_id=_config["database_id"])
+    db = firestore.async_client(database_id=_config["database_id"])
 except Exception as e:
     print(f"Fatal Error: Could not initialize Firebase/Firestore. {e}", file=sys.stderr)
     traceback.print_exc()

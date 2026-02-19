@@ -39,7 +39,7 @@ async def load_course_info_from_db(db) -> dict:
     try:
         courses_ref = db.collection(u'courses')
         docs = courses_ref.stream()
-        for doc in docs:
+        async for doc in docs:
             all_courses[doc.id] = doc.to_dict()
         logging.info(f"Loaded {len(all_courses)} courses from Firestore")
     except Exception as e:
@@ -54,7 +54,7 @@ async def update_course_info(db, course_handle:str, keyname: str, value: Any):
         course = await db.collection(u'courses').document(course_handle).get()
         if not course.exists:
             raise CourseNotFoundError(course_handle)  
-        course.set({keyname: value, 'last_updated': firestore.SERVER_TIMESTAMP}, merge=True)      
+        await course.reference.set({keyname: value, 'last_updated': firestore.SERVER_TIMESTAMP}, merge=True)      
 
     except google_exceptions.NotFound:
         logging.error("Firestore collection 'courses' not found.")
@@ -107,9 +107,8 @@ async def get_student_list(db, course_handle: str):
         if not course_doc.exists:
             raise CourseNotFoundError(course_handle)
         students_ref = courses_ref.collection(u'Students')
-        students = await students_ref.select([]).stream()
         student_list = []
-        for doc in students:
+        async for doc in students_ref.select([]).stream():
             student_list.append(doc.id)
 
     except google_exceptions.NotFound:
@@ -140,9 +139,8 @@ async def get_marks_list(db, course_handle: str,  notebook_id: str):
         if not course_doc.exists:
             raise CourseNotFoundError(course_handle)
         students_ref = courses_ref.collection(u'Students')
-        students = await students_ref.select([]).stream()
         marks_list = []
-        for doc in students:
+        async for doc in students_ref.select([]).stream():
             notebook_ref = students_ref.document(doc.id).collection(u'notebooks')
             notebook = await notebook_ref.document(notebook_id).get()
             marks_info = {'student_id': doc.id}
@@ -242,7 +240,7 @@ async def add_answer_notebook(db, course_id, student_id, student_name, notebook_
         if notebook_doc.exists:
             logging.warning(f"Notebook with ID '{notebook_id}' already exists for student '{student_id}' in course '{course_id}'. Overwriting the existing notebook.")
 
-        notebook_ref.set({
+        await notebook_ref.set({
             u'answer_notebook': answer_notebook,
             u'answer_hash': answer_hash,
             u'submitted_at': firestore.SERVER_TIMESTAMP
