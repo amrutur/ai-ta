@@ -240,8 +240,14 @@ _config = load_app_config()
 # Initialize Firebase Admin with loaded credentials
 try:
     cred = credentials.Certificate(_config["firestore_cred_dict"])
-    firebase_admin.initialize_app(cred)
-    db = firestore.async_client(database_id=_config["database_id"])
+    app = firebase_admin.initialize_app(cred)
+    # firebase_admin.firestore has no async_client() helper, so construct
+    # the AsyncClient directly using the app's service-account credentials.
+    db = firestore.AsyncClient(
+        credentials=app.credential.get_credential(),
+        project=_config["project_id"],
+        database=_config["database_id"],
+    )
 except Exception as e:
     print(f"Fatal Error: Could not initialize Firebase/Firestore. {e}", file=sys.stderr)
     traceback.print_exc()
