@@ -53,10 +53,13 @@ async def update_course_info(db, course_handle:str, keyname: str, value: Any):
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
 
 async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict):
-    ''' Save the rubric information to the Firestore database under a Rubrics subcollection.
+    ''' Save the notebook's rubric information to the Firestore database under Notebooks 
+        subcollection for this course.
+
+        Holds the context, questions, and answers for the rubric notebook, which will be used by the grading agent when grading student submissions. Also saves the max_marks for the notebook, which is used to calculate the final grade percentage for the submission.
     '''
     try:
-        rubric_ref = db.collection(u'courses').document(course_handle).collection(u'Rubrics').document(notebook_id)
+        rubric_ref = db.collection(u'courses').document(course_handle).collection(u'Notebooks').document(notebook_id)
         await rubric_ref.set({
             u'max_marks': max_marks,
             u'context': context,
@@ -110,6 +113,54 @@ async def get_student_list(db, course_handle: str):
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
 
     return student_list
+
+async def get_marks_list(db, course_handle: str,  notebook_id: str):
+    '''Return the list of student marks for the course_id in the Firestore database.'''
+    try:
+        courses_ref = db.collection(u'courses').document(course_handle)
+        course_doc = await courses_ref.get()
+        if not course_doc.exists:
+            raise CourseNotFoundError(course_handle)
+        students_ref = courses_ref.collection(u'Students')
+        students = await students_ref.select([]).stream()
+        marks_list = []
+        for doc in students:
+            notebook_ref = students_ref.document(doc.id).collection(u'notebooks')
+            notebook = await notebook_ref.document(notebook_id).get()
+            marks_info = {'student_id': doc.id}
+            if notebook.exists:
+                notebook_dict = notebook.to_dict()
+                max_marks = notebook_dict.get('max_marks', None)
+                if 'graded_at' in notebook_dict:   
+                    #notebook has been graded, so we can return the total marks (even if zero)             
+                    marks_info['total_marks'] = notebook_dict.get('total_marks', None)
+                else:
+                    marks_info['total_marks'] = -1 # Indicate not graded yet with -1
+            else:
+                marks_info['total_marks'] = 0 # Indicate no submission with None
+            marks_list.append(marks_info)
+
+    except google_exceptions.NotFound:
+        logging.error("Firestore collection 'courses' not found.")
+        raise HTTPException(status_code=500, detail="Database access error.")
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")        
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_handle}")
+        raise HTTPException(status_code=404, detail=e.message)
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
+
+    return max_marks, marks_list
+
+
 
 async def add_student_if_not_exists(db, course_id, student_id, student_name):
     '''Add the student to the course's Students subcollection if not already present.
