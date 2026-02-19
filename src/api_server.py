@@ -77,7 +77,8 @@ from database import (
     make_course_handle,
     save_rubric,
     get_marks_list,
-    get_course_data
+    get_course_data,
+    load_course_info_from_db
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from agent_service import run_agent_and_get_response, score_question, evaluate
@@ -138,18 +139,12 @@ else:
 async def load_courses_cache():
     """Load all courses from Firestore into the in-memory cache on startup."""
     try:
-        courses_ref = config.db.collection(u'courses')
-        docs = courses_ref.stream()
-        count = 0
-        async for doc in docs:
-            course_data = doc.to_dict()
-            course_handle = doc.id
+        all_courses = await load_course_info_from_db(config.db)
+        for course_handle, course_data in all_courses.items():
             courses[course_handle] = course_data
-            # Ensure runtime flags have defaults
             courses[course_handle].setdefault('isactive_tutor', True)
             courses[course_handle].setdefault('isactive_eval', False)
-            count += 1
-        logging.info(f"Loaded {count} courses into cache on startup")
+        logging.info(f"Loaded {len(all_courses)} courses into cache on startup")
     except Exception as e:
         logging.error(f"Failed to load courses cache on startup: {e}")
         traceback.print_exc()

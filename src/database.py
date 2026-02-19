@@ -29,6 +29,24 @@ def make_course_handle(institution_id: str, term_id: str, course_id: str) -> str
     name = re.sub(r'-+', '-', name).strip('-')
     return name
 
+async def load_course_info_from_db(db) -> dict:
+    '''Load all course documents from Firestore and return them as a dict.
+
+    Returns:
+        Dictionary mapping course_handle -> course_data dict
+    '''
+    all_courses = {}
+    try:
+        courses_ref = db.collection(u'courses')
+        docs = courses_ref.stream()
+        async for doc in docs:
+            all_courses[doc.id] = doc.to_dict()
+        logging.info(f"Loaded {len(all_courses)} courses from Firestore")
+    except Exception as e:
+        logging.error(f"Failed to load courses from Firestore: {e}")
+        raise
+    return all_courses
+
 async def update_course_info(db, course_handle:str, keyname: str, value: Any):
     ''' Update course document's key to value in the Firestore database.
     '''
