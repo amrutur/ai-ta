@@ -129,11 +129,11 @@ def load_app_config():
     # --- Load all required values ---
     is_production = os.environ.get('PRODUCTION', '0') == '1'
     database_id = get_required_env('FIRESTORE_DATABASE_ID')
-    oauth_client_id = get_required_secret('OAUTH_CLIENT_ID_KEY_NAME')
-    oauth_client_secret = get_required_secret('OAUTH_CLIENT_SECRET_KEY_NAME')
-    signing_secret_key = get_required_secret('SIGNING_SECRET_KEY_NAME')
-    firestore_key_id = get_required_secret('FIRESTORE_PRIVATE_KEY_ID_KEY_NAME')
-    firestore_key_raw = get_required_secret('FIRESTORE_PRIVATE_KEY_KEY_NAME')
+    oauth_client_id = get_required_secret(project_id,'OAUTH_CLIENT_ID_KEY_NAME')
+    oauth_client_secret = get_required_secret(project_id,'OAUTH_CLIENT_SECRET_KEY_NAME')
+    signing_secret_key = get_required_secret(project_id, 'SIGNING_SECRET_KEY_NAME')
+    firestore_key_id = get_required_secret(project_id, 'FIRESTORE_PRIVATE_KEY_ID_KEY_NAME')
+    firestore_key_raw = get_required_secret(project_id,'FIRESTORE_PRIVATE_KEY_KEY_NAME')
     # Gemini API key is optional — not needed when using Vertex AI with a service account
     gemini_api_key_name = os.environ.get('GEMINI_API_KEY_NAME', '')
     sendgrid_from_email = os.environ.get('SENDGRID_FROM_EMAIL', '')    
