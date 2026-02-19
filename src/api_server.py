@@ -132,6 +132,29 @@ else:
     logging.info("Session cookies configured for HTTP development (localhost)")
 
 
+# ==================== Startup Event ====================
+
+@app.on_event("startup")
+async def load_courses_cache():
+    """Load all courses from Firestore into the in-memory cache on startup."""
+    try:
+        courses_ref = config.db.collection(u'courses')
+        docs = courses_ref.stream()
+        count = 0
+        async for doc in docs:
+            course_data = doc.to_dict()
+            course_handle = doc.id
+            courses[course_handle] = course_data
+            # Ensure runtime flags have defaults
+            courses[course_handle].setdefault('isactive_tutor', True)
+            courses[course_handle].setdefault('isactive_eval', False)
+            count += 1
+        logging.info(f"Loaded {count} courses into cache on startup")
+    except Exception as e:
+        logging.error(f"Failed to load courses cache on startup: {e}")
+        traceback.print_exc()
+
+
 # ==================== Authentication Endpoints ====================
 
 @app.get("/login", tags=["Authentication"])
@@ -453,7 +476,7 @@ async def assist(query_body: AssistRequest, request: Request):
 
 
     # Check if tutor is disabled by instructor
-    if not courses[course_handle].isactive_tutor:
+    if not courses[course_handle].get('isactive_tutor', False):
         raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
 
     runner = config.runner_assist
@@ -474,7 +497,7 @@ async def assist(query_body: AssistRequest, request: Request):
                     session_id=session_id
                 )
 
-        if query_body.notebook_id in courses[course_handle].notebooks:
+        if query_body.notebook_id in courses[course_handle]:
             qnum = query_body.qnum
             answer = courses[course_handle][query_body.notebook_id]['answers'].get(str(qnum))
             if answer is not None:
