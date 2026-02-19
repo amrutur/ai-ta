@@ -68,8 +68,7 @@ from auth import (
 )
 from database import (
     get_student_list,
-    get_user_list,
-    add_user_if_not_exists,
+    add_student_if_not_exists,
     add_answer_notebook,
     update_course_info,
     update_marks,
@@ -302,7 +301,7 @@ async def oauth_callback(request: Request):
             return HTMLResponse(content=html_content, status_code=403)
 
     try:
-        user_list = get_user_list(config.db)
+        user_list = get_student_list(config.db)
 
         if user_id not in user_list:
             logging.info(f"User '{user_name}' ({user_id}) not in database. Adding now.")
@@ -411,7 +410,7 @@ async def colab_auth(request: Request):
 
     # Add student to the course's Students subcollection if not already present
     try:
-        add_user_if_not_exists(config.db, course_id, user_gmail, user_name)
+        add_student_if_not_exists(config.db, course_id, user_gmail, user_name)
     except Exception as e:
         logging.error(f"Firestore error during colab_auth student creation: {e}")
 
@@ -683,7 +682,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
         logging.info(f"google_user_name={google_user_name}, google_user_id={google_user_id}")
 
-        add_user_if_not_exists(config.db, query_body.course_id, google_user_id, user_name, user_email, google_user_name)
+        add_student_if_not_exists(config.db, query_body.course_id, google_user_id, user_name, user_email, google_user_name)
 
         add_answer_notebook(config.db, google_user_id, query_body.notebook_id, query_body.answer_notebook, answer_hash)
 
