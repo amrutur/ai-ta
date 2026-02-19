@@ -13,8 +13,6 @@ from jwt.exceptions import InvalidTokenError
 from fastapi import HTTPException, Request
 
 import config
-from database import is_instructor
-
 
 def credentials_to_dict(credentials):
     """Helper function to convert Google credentials to a dictionary."""
