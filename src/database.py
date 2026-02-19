@@ -417,19 +417,20 @@ async def fetch_grader_response(db, course_handle:str, notebook_id: str = None, 
         answer_ref = student_ref.collection(u'Notebooks').document(notebook_id)
         answer_doc = await answer_ref.get()
         if not answer_doc.exists:
-            logging.warning(f"Notebook{notebook_id} for student '{student_id}' in course '{course_handle}' not found. Creating one to give zero marks")
+            logging.warning(f"Notebook '{notebook_id}' for student '{student_id}' in course '{course_handle}' not found.")
+            raise NotebookNotFoundError(notebook_id, student_id, course_handle)
 
-        answer_doc = answer_doc.to_dict()
+        answer_dict = answer_doc.to_dict()
 
-        graded_json = answer_doc.get('graded_json', None)
+        graded_json = answer_dict.get('graded_json', None)
 
         if graded_json is None:
             logging.warning(f"Graded response for notebook '{notebook_id}' for student '{student_id}' in course '{course_handle}' not found. This may be because the notebook has not been graded yet, or because the grading data is in an older format. Returning None for this student's response.")
             return None
 
-        logging.debug(f"student_id: {student_id} : total marks: {answer_doc.get('total_marks')} Response json: {graded_json}")
+        logging.debug(f"student_id: {student_id} : total marks: {answer_dict.get('total_marks')} Response json: {graded_json}")
 
-        grader_response = {'student_id': student_id, 'total_marks': answer_doc.get('total_marks'), 'max_marks': answer_doc.get('max_marks')}
+        grader_response = {'student_id': student_id, 'total_marks': answer_dict.get('total_marks'), 'max_marks': answer_dict.get('max_marks')}
         grader_response['feedback'] = graded_json
 
         return grader_response
