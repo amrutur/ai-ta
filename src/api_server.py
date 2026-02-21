@@ -463,24 +463,28 @@ async def logout(request: Request):
 @app.post("/assist", response_model=AssistResponse)
 async def assist(query_body: AssistRequest, request: Request):
 
-    ''' Call the AI Tutor agent to get assistance for a question.'''
+    ''' 
+    Call the AI Tutor agent to get assistance for a question.
+    For a student: it can be used to get hints for a question, or to check if the answer is correct without giving away the marks.
+    For a TA/Instructor: It can be used to get suggestions for the question, grading an answer, or to check if the answer is correct along with the suggested marks.
+    '''
 
-    student = get_current_user(request)
+
+    user = get_current_user(request)
+    user_gmail = user.get('email')
 
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
+    is_instructor = is_authorized(user_gmail, course_handle)
 
     # Check if tutor is disabled by instructor
-    if not courses[course_handle].get('isactive_tutor', False):
+    if not is_instructor and not courses[course_handle].get('isactive_tutor', False):
         raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
 
     runner = config.runner_assist
 
-    student_gmail = student.get('email')
-
     try:
         # Use a consistent session ID for the agent conversation
-
         if 'agent_session_id' in request.session:
             session_id = request.session.get('agent_session_id')
         else:
@@ -488,15 +492,60 @@ async def assist(query_body: AssistRequest, request: Request):
             request.session['agent_session_id'] = session_id
             await config.session_service.create_session(
                     app_name=runner.app_name,
-                    user_id=student_gmail,
+                    user_id=user_gmail,
                     session_id=session_id
                 )
+        parts = []
+        context = query_body.context
+        question=query_body.question.get("question", "")
+        ta_chat = query_body.ta_chat
+        answer = query_body.answer
+        output  = query_body.output
+        qnum = query_body.qnum
+        if is_instructor:
+            # the insrtuctor is asking the agent - so we should provide the full context, question, 
+            # instructor's answer and output to get better suggestions from the agent for grading and 
+            # providing feedback to the students. The instructor can also ask the agent to check if 
+            # the answer is correct without providing the rubric (by not providing the answer and 
+            # output in the query body), in that case we should not provide the rubric to the agent 
+            # as well to get a more unbiased response from the agent about the correctness of the 
+            # answer.
+            if context:
+                parts.append(types.Part.from_text("{The topic content is:} " + str(context)))
+            if question:
+                parts.append(types.Part.from_text("{The question is:} " + str(question)))
+            if ta_chat:
+                parts.append(types.Part.from_text("{The instructor asks:} " + str(ta_chat)))        
+            if answer:
+                parts.append(types.Part.from_text("{The instructor's answer is} " + str(answer)))
+            if output:
+                parts.append(types.Part.from_text("{The instructor's code output is} " + json.dumps(output)))
+        else:
+            # student asking the agent - so we can use the cached context and question from the rubric 
+            # if available to provide better assistance, but we should not use the instructor's 
+            # answer and output in that case as it may give away the answer to the student
 
-        if query_body.notebook_id in courses[course_handle]:
-            qnum = query_body.qnum
-            answer = courses[course_handle][query_body.notebook_id]['answers'].get(str(qnum))
-            if answer is not None:
-                rubric =  "{The rubric is} " + answer
+            if query_body.notebook_id not in courses[course_handle]:
+                raise HTTPException(status_code=404, detail="Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first.")
+            #get the context and question from rubric (stored in the cache)
+            context = courses[course_handle][query_body.notebook_id]['context'].get(str(qnum))
+            question = courses[course_handle][query_body.notebook_id]['questions'].get(str(qnum))
+            if question is None:
+                raise HTTPException(status_code=404, detail="Question not found in rubric for this course and notebook.")
+            rubric_answer = courses[course_handle][query_body.notebook_id]['answers'].get(str(qnum))
+            rubric_output = courses[course_handle][query_body.notebook_id]['outputs'].get(str(qnum))
+            
+            if context is not None:
+                parts.append(types.Part.from_text("{The context is:} " + str(context)))
+            parts.append(types.Part.from_text("{The question is:} " + str(question)))
+            parts.append(types.Part.from_text("{The student's answer is} " + str(answer)))
+            if output:
+                parts.append(types.Part.from_text("{The student's code output is} " + json.dumps(output)))
+            parts.append(types.Part.from_text("{The student asks:} " + str(ta_chat)))
+            if rubric_answer is not None:
+                parts.append(types.Part.from_text("{The rubric is} " + str(rubric_answer)))
+            if rubric_output is not None:
+                parts.append(types.Part.from_text("{The rubric code output is} " + str(rubric_output)))
 
         # Create a message from the query
         content = types.Content(
@@ -514,86 +563,6 @@ async def assist(query_body: AssistRequest, request: Request):
             response=response_text
             )
 
-    except Exception as e:
-        # By logging the exception with its traceback, you can see the root cause in your server logs.
-        logging.error("An exception occurred during query processing: %s", e)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
-
-
-@app.post("/query", response_model=QueryResponse)
-async def process_query(query_body: QueryRequest, request: Request):
-
-    # Check if tutor is disabled by instructor
-    if not config.isactive_tutor:
-        raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
-
-    runner = config.runner_assist
-
-    try:
-        # Use a consistent session ID for the agent conversation
-        session_id = request.session.get('agent_session_id', str(uuid.uuid4()))
-        request.session['agent_session_id'] = session_id
-
-        user_id = query_body.user_email if query_body.user_email else "anonymous_user"
-        user_name = query_body.user_name if query_body.user_name else "Anonymous User"
-
-        # Create a message from the query
-        content = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=query_body.query)]
-        )
-
-        logging.info(f"User {user_name}, has asked for checking for question {query_body.q_name} in course {query_body.course_id} and notebook={query_body.notebook_id}")
-
-        if query_body.rubric_link:
-            # Read rubric notebook using the application's service account, not the logged-in user's credentials.
-            notebook_content = await asyncio.to_thread(
-                load_notebook_from_google_drive_sa, config.firestore_cred_dict, str(query_body.rubric_link)
-            )
-            if notebook_content is None:
-                raise HTTPException(
-                    status_code=404, detail=f"Rubric notebook '{query_body.rubric_link}' not found. Ensure it is shared with the service account: {config.firestore_cred_dict.get('client_email')}"
-                )
-
-            try:
-                # .ipynb files are JSON, so we can return them as JSON
-                notebook_json = json.loads(notebook_content)
-            except json.JSONDecodeError:
-                # Or return as plain text if it's not valid JSON for some reason
-                return HTMLResponse(content=f"<pre>Could not parse notebook as JSON. Raw content:\n\n{notebook_content}</pre>")
-
-
-        try:
-            # Attempt to get the response using the current session ID
-            response_text = await run_agent_and_get_response(session_id, user_id, content, runner)
-        except ValueError as e:
-            # This error indicates the session ID in the cookie is stale or invalid.
-            if "Session not found" in str(e):
-                print(f"Stale session ID '{session_id}' detected. Creating and retrying with a new session.")
-                # Create a new session ID
-                new_session_id = str(uuid.uuid4())
-                # Explicitly create the new session in the database before using it.
-                await config.session_service.create_session(
-                    app_name=runner.app_name,
-                    user_id=user_id,
-                    session_id=new_session_id
-                )
-                request.session['agent_session_id'] = new_session_id
-                response_text = await run_agent_and_get_response(new_session_id, user_id, content, runner)
-            else:
-                # Re-raise any other ValueError that is not a session not found error.
-                raise
-
-        if not response_text:
-            raise HTTPException(status_code=500, detail="Failed to generate response")
-
-        return QueryResponse(
-            response=response_text
-            )
-
-    except KeyError:
-        raise HTTPException(status_code=401, detail="Invalid session data. Please login again.")
     except Exception as e:
         # By logging the exception with its traceback, you can see the root cause in your server logs.
         logging.error("An exception occurred during query processing: %s", e)
@@ -803,7 +772,7 @@ def is_authorized(user_gmail: str, course_handle: str) -> bool:
         return False
     instructor_gmail = courses.get(course_handle, {}).get('instructor_gmail', '').lower()
     if user_gmail.lower() not in [instructor_gmail, config.admin_email]:
-        logging.warning(f"Unauthorized access attempt by {user_gmail} for course {course_handle}. Instructor: {instructor_gmail}, Admin: {config.admin_email}")
+        #logging.warning(f"Unauthorized access attempt by {user_gmail} for course {course_handle}. Instructor: {instructor_gmail}, Admin: {config.admin_email}")
         return False
     return True
 

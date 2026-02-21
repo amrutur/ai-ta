@@ -22,7 +22,7 @@ class QueryResponse(BaseModel):
 class AssistRequest(BaseModel):
     qnum: int
     context: str
-    question: str
+    question: Dict[str,Any]
     answer: str
     output: Dict[str,Any]
     ta_chat: str

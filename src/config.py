@@ -283,10 +283,6 @@ bucket_name = _config["bucket_name"]
 if _config.get("gemini_api_key"):
     os.environ['GOOGLE_API_KEY'] = str(_config["gemini_api_key"])
 
-# Import agents
-root_agent = agent.root_agent
-scoring_agent = agent.scoring_agent
-
 # Create a database session service
 # Use aiosqlite for async support (required for Cloud Run deployment)
 session_service = DatabaseSessionService(
@@ -294,13 +290,7 @@ session_service = DatabaseSessionService(
 )
 
 # Create runners with the agents
-runner_assist = Runner(
-    app_name="ai_ta_teaching_agent",
-    agent=root_agent,
+runner = Runner(
+    app_name="ai_ta",
     session_service=session_service
-)
-runner_score = Runner(
-    app_name="ai_ta_scoring_agent",
-    agent=scoring_agent,
-    session_service=session_service
-)
+)   
