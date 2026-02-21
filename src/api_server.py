@@ -36,8 +36,7 @@ import uuid
 from typing import Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import  HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 import uvicorn
@@ -48,6 +47,9 @@ from googleapiclient.discovery import build
 from google.genai import types
 
 import config
+from agent_service import run_agent_and_get_response, score_question, evaluate
+import agent
+
 from models import (
     QueryRequest, QueryResponse,
     AssistRequest, AssistResponse,
@@ -61,7 +63,6 @@ from models import (
     AddRubricRequest, AddRubricResponse
 )
 from auth import (
-    credentials_to_dict,
     create_jwt_token,
     get_current_user,
     get_admin_user,
@@ -481,7 +482,7 @@ async def assist(query_body: AssistRequest, request: Request):
     if not is_instructor and not courses[course_handle].get('isactive_tutor', False):
         raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
 
-    runner = config.runner_assist
+    runner = config.runner
 
     try:
         # Use a consistent session ID for the agent conversation
@@ -520,6 +521,7 @@ async def assist(query_body: AssistRequest, request: Request):
                 parts.append(types.Part.from_text("{The instructor's answer is} " + str(answer)))
             if output:
                 parts.append(types.Part.from_text("{The instructor's code output is} " + json.dumps(output)))
+            target_agent = agent.instructor_assist_agent
         else:
             # student asking the agent - so we can use the cached context and question from the rubric 
             # if available to provide better assistance, but we should not use the instructor's 
@@ -546,7 +548,8 @@ async def assist(query_body: AssistRequest, request: Request):
                 parts.append(types.Part.from_text("{The rubric is} " + str(rubric_answer)))
             if rubric_output is not None:
                 parts.append(types.Part.from_text("{The rubric code output is} " + str(rubric_output)))
-
+            target_agent = agent.student_assist_agent
+                
         # Create a message from the query
         content = types.Content(
             role="user",
@@ -554,7 +557,7 @@ async def assist(query_body: AssistRequest, request: Request):
         )
 
         # Attempt to get the response using the current session ID
-        response_text = await run_agent_and_get_response(session_id, student_gmail, content, runner)
+        response_text = await run_agent_and_get_response(session_id, user_gmail, content, target_agent, runner)
 
         if not response_text:
             raise HTTPException(status_code=500, detail="Failed to generate response")
@@ -574,7 +577,7 @@ async def assist(query_body: AssistRequest, request: Request):
 async def grade(query_body: GradeRequest, request: Request):
 
     '''Grade a single question-answer'''
-    runner = config.runner_score
+    runner = config.runner
 
     if ('user' in request.session) : #user is logged and authenticated
         user_id = request.session['user']['id']
@@ -626,7 +629,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     if not config.isactive_eval:
         raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive")
 
-    runner = config.runner_score
+    runner = config.runner
 
     try:
 
