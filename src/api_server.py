@@ -1093,7 +1093,7 @@ async def create_course_api(
         courses[course_handle] = {
             'course_id': query_body.course_id,
             'term_id': query_body.term_id,
-            'institution_id': query_body.institution_iddoes_course_exist
+            'institution_id': query_body.institution_id
         }
 
 
