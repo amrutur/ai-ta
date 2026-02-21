@@ -117,7 +117,7 @@ def get_admin_user(request: Request) -> Dict[str, Any]:
 
     user_email = user.get('email', '').lower()
 
-    if user_email not in [email.lower() for email in config.ADMIN_EMAILS]:
+    if user_email != config.admin_email:
         raise HTTPException(
             status_code=403,
             detail="Access forbidden. This endpoint is only available to platform administrators."

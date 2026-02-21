@@ -303,7 +303,7 @@ async def oauth_callback(request: Request):
 
     # If this login was initiated from /admin_login, verify admin authorization
     if request.session.pop('admin_login', False):
-        if user_email.lower() != config.admin_email.lower():
+        if user_email.lower() != config.admin_email:
             logging.warning(f"Unauthorized admin login attempt by {user_email}")
             request.session.clear()
             html_content = """
