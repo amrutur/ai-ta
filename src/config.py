@@ -79,9 +79,7 @@ if not admin_email:
 SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/userinfo.email",
-    "openid",
-    "https://www.googleapis.com/auth/drive.readonly",  # Add scope to read Google Drive files
-    'https://www.googleapis.com/auth/gmail.send', #send email
+    "openid"
 ]
 
 
