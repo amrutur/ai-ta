@@ -303,7 +303,7 @@ async def oauth_callback(request: Request):
 
     # If this login was initiated from /admin_login, verify admin authorization
     if request.session.pop('admin_login', False):
-        if user_email.lower() not in [email.lower() for email in config.admin_email]:
+        if user_email.lower() != config.admin_email.lower():
             logging.warning(f"Unauthorized admin login attempt by {user_email}")
             request.session.clear()
             html_content = """
@@ -318,23 +318,13 @@ async def oauth_callback(request: Request):
             </html>
             """
             return HTMLResponse(content=html_content, status_code=403)
-
-    try:
-        user_list = get_student_list(config.db)
-
-        if user_id not in user_list:
-            logging.info(f"User '{user_name}' ({user_id}) not in database. Adding now.")
-            user_ref = config.db.collection(u'users').document(user_id)
-            user_ref.set({
-                u'name': user_name,
-                u'email': user_email
-            })
-    except Exception as e:
-        logging.error(f"Firestore error during user lookup/creation: {e}")
-        traceback.print_exc()
-        # Don't block login for database errors - user is already authenticated
-
-    return RedirectResponse(url="/get_auth_token", status_code=302)
+        else:
+            logging.info(f"Admin user '{user_name}' ({user_email}) successfully authenticated.")
+            return RedirectResponse(url="/docs", status_code=302)
+    else:
+        #either an instructor or student loggin in via colab
+        #redirect them to get the JWT token for API access
+        return RedirectResponse(url="/get_auth_token", status_code=302)
 
 @app.get("/get_auth_token", tags=["Authentication"], response_class=HTMLResponse)
 async def get_auth_token(request: Request):
@@ -486,6 +476,7 @@ async def assist(query_body: AssistRequest, request: Request):
 
     user = get_current_user(request)
     user_gmail = user.get('email')
+    user_name = user.get('name')
 
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
@@ -539,7 +530,8 @@ async def assist(query_body: AssistRequest, request: Request):
             # student asking the agent - so we can use the cached context and question from the rubric 
             # if available to provide better assistance, but we should not use the instructor's 
             # answer and output in that case as it may give away the answer to the student
-
+            
+            add_student_if_not_exists(config.db, course_handle, user_gmail, user_name) #ensure the student is added to the course in the database
             if query_body.notebook_id not in courses[course_handle]:
                 raise HTTPException(status_code=404, detail="Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first.")
             #get the context and question from rubric (stored in the cache)

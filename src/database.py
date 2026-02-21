@@ -67,7 +67,7 @@ async def update_course_info(db, course_handle:str, keyname: str, value: Any):
         logging.error(f"A network error occurred with Firestore: {e}")
         raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
     except Exception as e:
-        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        logging.error(f"An unexpected error occurred in update_course_info: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
 
 async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict):
@@ -126,7 +126,7 @@ async def get_student_list(db, course_handle: str):
         logging.info(f"User requested non-existent course: {course_handle}")
         raise HTTPException(status_code=404, detail=e.message)
     except Exception as e:
-        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        logging.error(f"An unexpected error occurred in get_student_list: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
 
     return student_list
@@ -171,24 +171,23 @@ async def get_marks_list(db, course_handle: str,  notebook_id: str):
         logging.info(f"User requested non-existent course: {course_handle}")
         raise HTTPException(status_code=404, detail=e.message)
     except Exception as e:
-        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        logging.error(f"An unexpected error occurred in get_marks_list: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
 
     return max_marks, marks_list
 
 
-
-async def add_student_if_not_exists(db, course_id, student_id, student_name):
+async def add_student_if_not_exists(db, course_handle, student_id, student_name):
     '''Add the student to the course's Students subcollection if not already present.
 
-    Path: courses/{course_id}/Students/{student_id}
+    Path: courses/{course_handle}/Students/{student_id}
     '''
     try:
-        course_ref = db.collection(u'courses').document(course_id)
+        course_ref = db.collection(u'courses').document(course_handle)
         course_doc = await course_ref.get()
         if not course_doc.exists:
-            logging.error(f"Course with ID '{course_id}' not found when trying to add student '{student_id}'.")
-            raise CourseNotFoundError(course_id)       
+            logging.error(f"Course:'{course_handle}' not found when trying to add student '{student_id}'.")
+            raise CourseNotFoundError(course_handle)       
         student_ref = course_ref.collection(u'Students').document(student_id)
         student_doc = await student_ref.get()
         if not student_doc.exists:
