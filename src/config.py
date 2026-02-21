@@ -292,5 +292,6 @@ session_service = DatabaseSessionService(
 # Create runners with the agents
 runner = Runner(
     app_name="ai_ta",
+    agent=agent.student_assist_agent,
     session_service=session_service
 )   
