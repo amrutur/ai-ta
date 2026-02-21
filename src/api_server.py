@@ -14,7 +14,7 @@ It logs the interactions in a Firsestore NoSQl database
 Required environment parameters:
 GOOGLE_CLOUD_PROECT (should be set to be the project id for the application google cloud)
 PRODUCTION (should be set to 0 for local testing and 1 for production)
-ADMIN_EMAILS (comma-separated list of platform administrator email addresses)
+ADMIN_EMAIL (platform administrator email addresses)
 OAUTH_REDIRECT_URI (optional, for development with ngrok - e.g., https://yoursubdomain.ngrok-free.app/callback)
 SENDGRID_FROM_EMAIL (email address to send emails from)
 
@@ -303,7 +303,7 @@ async def oauth_callback(request: Request):
 
     # If this login was initiated from /admin_login, verify admin authorization
     if request.session.pop('admin_login', False):
-        if user_email.lower() not in [email.lower() for email in config.ADMIN_EMAILS]:
+        if user_email.lower() not in [email.lower() for email in config.admin_email]:
             logging.warning(f"Unauthorized admin login attempt by {user_email}")
             request.session.clear()
             html_content = """
