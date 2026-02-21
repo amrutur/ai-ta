@@ -377,6 +377,19 @@ async def get_auth_token(request: Request):
     """
     return HTMLResponse(content=html_content, status_code=200)
 
+@app.get("/whoami", tags=["Authentication"])
+async def whoami(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Returns the currently authenticated user's info.
+    Accepts both session cookies (browser) and Bearer JWT tokens (API clients).
+    Useful for verifying a token is valid from Colab notebooks.
+    """
+    return {
+        "id": current_user.get("id"),
+        "email": current_user.get("email"),
+        "name": current_user.get("name"),
+    }
+
 @app.post("/colab_auth", tags=["Authentication"])
 async def colab_auth(request: Request):
     """
