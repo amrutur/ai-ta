@@ -432,7 +432,7 @@ async def colab_auth(request: Request):
 
     # Add student to the course's Students subcollection if not already present
     try:
-        add_student_if_not_exists(config.db, course_id, user_gmail, user_name)
+        await add_student_if_not_exists(config.db, course_id, user_gmail, user_name)
     except Exception as e:
         logging.error(f"Firestore error during colab_auth student creation: {e}")
 
@@ -531,7 +531,7 @@ async def assist(query_body: AssistRequest, request: Request):
             # if available to provide better assistance, but we should not use the instructor's 
             # answer and output in that case as it may give away the answer to the student
             
-            add_student_if_not_exists(config.db, course_handle, user_gmail, user_name) #ensure the student is added to the course in the database
+            await add_student_if_not_exists(config.db, course_handle, user_gmail, user_name) #ensure the student is added to the course in the database
             if query_body.notebook_id not in courses[course_handle]:
                 raise HTTPException(status_code=404, detail="Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first.")
             #get the context and question from rubric (stored in the cache)
@@ -677,9 +677,9 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
         logging.info(f"google_user_name={google_user_name}, google_user_id={google_user_id}")
 
-        add_student_if_not_exists(config.db, query_body.course_id, google_user_id, user_name, user_email, google_user_name)
+        await add_student_if_not_exists(config.db, query_body.course_handle, google_user_id, user_name, user_email, google_user_name)
 
-        add_answer_notebook(config.db, google_user_id, query_body.notebook_id, query_body.answer_notebook, answer_hash)
+        await add_answer_notebook(config.db, google_user_id, query_body.notebook_id, query_body.answer_notebook, answer_hash)
 
         # Read rubric notebook using the application's service account, not the logged-in user's credentials.
         logging.info(f"rubric link is {query_body.rubric_link}")
@@ -702,7 +702,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
             logging.info(f"{google_user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks} for {num_questions} questions.")
 
-            update_marks(config.db, google_user_id, query_body.notebook_id, total_marks, max_marks, graded)
+            await update_marks(config.db, google_user_id, query_body.notebook_id, total_marks, max_marks, graded)
 
             return EvalResponse(
                 response=google_user_name + ": You have successfully submitted notebook for evaluation. Graded answer will be sent to your email.",
@@ -955,7 +955,7 @@ async def fetch_grader_response_api(
 
         student_id = query_body.student_id
 
-        grader_response = fetch_grader_response(config.db, course_handle, query_body.notebook_id, student_id)
+        grader_response = await fetch_grader_response(config.db, course_handle, query_body.notebook_id, student_id)
         if not grader_response:
             raise HTTPException(status_code=404, detail="No graded response found for the given student and notebook")
 
@@ -992,7 +992,7 @@ async def notify_student_grades_api(
             
         student_id = query_body.student_id
 
-        grader_response = fetch_grader_response(config.db, course_handle, query_body.notebook_id, query_body.student_id)
+        grader_response = await fetch_grader_response(config.db, course_handle, query_body.notebook_id, query_body.student_id)
         if not grader_response:
             logging.warning(f"No graded response found for student_id={student_id} and notebook_id={query_body.notebook_id}")
             raise HTTPException(status_code=404, detail="No graded response found")
@@ -1058,7 +1058,7 @@ async def upload_rubric_api(
                                              'answers':query_body.answers} 
 
         #now save the rubric in the databse as well
-        save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers)
+        await save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers)
 
         return AddRubricResponse(
             response=f"Successfully added rubric '{query_body.rubric_name}' to course '{course_handle}'"
@@ -1082,7 +1082,7 @@ async def create_course_api(
 
         course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
-        course_data = get_course_data(config.db, course_handle)
+        course_data = await get_course_data(config.db, course_handle)
         if course_data is not None:
             logging.info(f"Course '{course_handle}' already exists. No new course created.")
             return CreateCourseResponse(
@@ -1134,7 +1134,7 @@ async def create_course_api(
         courses[course_handle]['isactive_tutor']= True
         courses[course_handle]['isactive_eval']= False
 
-        if create_course(config.db, courses[course_handle]):
+        if await create_course(config.db, courses[course_handle]):
             logging.info(f"Admin {current_user.get('email')} created course {query_body.course_name} ({courses[course_handle]['course_id']})")
 
             return CreateCourseResponse(
