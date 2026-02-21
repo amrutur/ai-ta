@@ -550,7 +550,7 @@ async def assist(query_body: AssistRequest, request: Request):
         # Create a message from the query
         content = types.Content(
             role="user",
-            parts=[types.Part.from_text(text=query_body.query+rubric)]
+            parts=parts
         )
 
         # Attempt to get the response using the current session ID
