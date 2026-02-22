@@ -287,9 +287,20 @@ session_service = DatabaseSessionService(
     db_url="sqlite+aiosqlite:///agent_sessions.db"
 )
 
-# Create runners with the agents
-runner = Runner(
+# Create runners — one per agent, since Runner.run_async() does not
+# support overriding the agent at call time.
+runner_instructor = Runner(
+    app_name="ai_ta",
+    agent=agent.instructor_assist_agent,
+    session_service=session_service
+)
+runner_student = Runner(
     app_name="ai_ta",
     agent=agent.student_assist_agent,
+    session_service=session_service
+)
+runner_scoring = Runner(
+    app_name="ai_ta",
+    agent=agent.scoring_assist_agent,
     session_service=session_service
 )   

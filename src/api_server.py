@@ -48,7 +48,6 @@ from google.genai import types
 
 import config
 from agent_service import run_agent_and_get_response, score_question, evaluate
-import agent
 
 from models import (
     QueryRequest, QueryResponse,
@@ -486,8 +485,6 @@ async def assist(query_body: AssistRequest, request: Request):
     if not is_instructor and not courses[course_handle].get('isactive_tutor', False):
         raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
 
-    runner = config.runner
-
     try:
         # Use a consistent session ID for the agent conversation
         if 'agent_session_id' in request.session:
@@ -496,7 +493,7 @@ async def assist(query_body: AssistRequest, request: Request):
             session_id = str(uuid.uuid4())
             request.session['agent_session_id'] = session_id
             await config.session_service.create_session(
-                    app_name=runner.app_name,
+                    app_name=config.runner_student.app_name,
                     user_id=user_gmail,
                     session_id=session_id
                 )
@@ -525,7 +522,7 @@ async def assist(query_body: AssistRequest, request: Request):
                 parts.append(types.Part.from_text(text="{The instructor's answer is} " + str(answer)))
             if output:
                 parts.append(types.Part.from_text(text="{The instructor's code output is} " + json.dumps(output)))
-            target_agent = agent.instructor_assist_agent
+            runner = config.runner_instructor
         else:
             # student asking the agent - so we can use the cached context and question from the rubric 
             # if available to provide better assistance, but we should not use the instructor's 
@@ -553,7 +550,7 @@ async def assist(query_body: AssistRequest, request: Request):
                 parts.append(types.Part.from_text(text="{The rubric is} " + str(rubric_answer)))
             if rubric_output is not None:
                 parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
-            target_agent = agent.student_assist_agent
+            runner = config.runner_student
                 
         # Create a message from the query
         content = types.Content(
@@ -562,7 +559,7 @@ async def assist(query_body: AssistRequest, request: Request):
         )
 
         # Attempt to get the response using the current session ID
-        response_text = await run_agent_and_get_response(session_id, user_gmail, content, target_agent, runner)
+        response_text = await run_agent_and_get_response(session_id, user_gmail, content, runner)
 
         if not response_text:
             raise HTTPException(status_code=500, detail="Failed to generate response")
@@ -582,7 +579,7 @@ async def assist(query_body: AssistRequest, request: Request):
 async def grade(query_body: GradeRequest, request: Request):
 
     '''Grade a single question-answer'''
-    runner = config.runner
+    runner = config.runner_scoring
 
     if ('user' in request.session) : #user is logged and authenticated
         user_id = request.session['user']['id']
@@ -634,7 +631,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     if not config.isactive_eval:
         raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive")
 
-    runner = config.runner
+    runner = config.runner_scoring
 
     try:
 

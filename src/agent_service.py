@@ -17,13 +17,10 @@ from fastapi import HTTPException
 from google.adk import Runner
 from google.adk.sessions import DatabaseSessionService
 from google.genai import types
-from google.adk.agents import Agent
 
-
-async def run_agent_and_get_response(current_session_id: str, user_id: str, content: types.Content, agent: Agent, runner: Runner) -> str:
+async def run_agent_and_get_response(current_session_id: str, user_id: str, content: types.Content, runner: Runner) -> str:
     """Helper to run the agent and aggregate the response text from the stream."""
     response_stream = runner.run_async(
-        agent=agent,
         user_id=user_id,
         session_id=current_session_id,
         new_message=content,
