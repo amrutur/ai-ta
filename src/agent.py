@@ -18,7 +18,7 @@ The instructor may also provide you with additional instructions or information 
 
 instructor_assist_agent = Agent(
     name="instructor_assist_agent",
-    model="gemini-3.0-pro-preview",  # You can replace this with your preferred model
+    model="gemini-2.5-pro",  # You can replace this with your preferred model
     description="An assistant to help the course instructor.",
     instruction=instructor_assist_prompt
 )
@@ -28,7 +28,7 @@ student_assist_prompt= """Your are a friendly teaching assistant for a graduate 
 
 student_assist_agent = Agent(
     name="ai_tutor_agent",
-    model="gemini-3.0-pro-preview",  # You can replace this with your preferred model
+    model="gemini-2.5-pro",  # You can replace this with your preferred model
     description="A teaching assistant agent.",
     instruction=student_assist_prompt
 )
@@ -46,7 +46,7 @@ Provide the reasoning for marking the components, but dont repeat the assignment
 
 scoring_assist_agent = Agent(
     name="ai_scoring_agent",
-    model="gemini-3.0-pro-preview",  # You can replace this with your preferred model
+    model="gemini-2.5-pro",  # You can replace this with your preferred model
     description="A scoring agent",
     instruction=scoring_assist_prompt
 )
