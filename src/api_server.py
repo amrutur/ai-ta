@@ -516,15 +516,15 @@ async def assist(query_body: AssistRequest, request: Request):
             # as well to get a more unbiased response from the agent about the correctness of the 
             # answer.
             if context:
-                parts.append(types.Part.from_text("{The topic content is:} " + str(context)))
+                parts.append(types.Part.from_text(text="{The topic content is:} " + str(context)))
             if question:
-                parts.append(types.Part.from_text("{The question is:} " + str(question)))
+                parts.append(types.Part.from_text(text="{The question is:} " + str(question)))
             if ta_chat:
-                parts.append(types.Part.from_text("{The instructor asks:} " + str(ta_chat)))        
+                parts.append(types.Part.from_text(text="{The instructor asks:} " + str(ta_chat)))        
             if answer:
-                parts.append(types.Part.from_text("{The instructor's answer is} " + str(answer)))
+                parts.append(types.Part.from_text(text="{The instructor's answer is} " + str(answer)))
             if output:
-                parts.append(types.Part.from_text("{The instructor's code output is} " + json.dumps(output)))
+                parts.append(types.Part.from_text(text="{The instructor's code output is} " + json.dumps(output)))
             target_agent = agent.instructor_assist_agent
         else:
             # student asking the agent - so we can use the cached context and question from the rubric 
@@ -543,16 +543,16 @@ async def assist(query_body: AssistRequest, request: Request):
             rubric_output = courses[course_handle][query_body.notebook_id]['outputs'].get(str(qnum))
             
             if context is not None:
-                parts.append(types.Part.from_text("{The context is:} " + str(context)))
-            parts.append(types.Part.from_text("{The question is:} " + str(question)))
-            parts.append(types.Part.from_text("{The student's answer is} " + str(answer)))
+                parts.append(types.Part.from_text(text="{The context is:} " + str(context)))
+            parts.append(types.Part.from_text(text="{The question is:} " + str(question)))
+            parts.append(types.Part.from_text(text="{The student's answer is} " + str(answer)))
             if output:
-                parts.append(types.Part.from_text("{The student's code output is} " + json.dumps(output)))
-            parts.append(types.Part.from_text("{The student asks:} " + str(ta_chat)))
+                parts.append(types.Part.from_text(text="{The student's code output is} " + json.dumps(output)))
+            parts.append(types.Part.from_text(text="{The student asks:} " + str(ta_chat)))
             if rubric_answer is not None:
-                parts.append(types.Part.from_text("{The rubric is} " + str(rubric_answer)))
+                parts.append(types.Part.from_text(text="{The rubric is} " + str(rubric_answer)))
             if rubric_output is not None:
-                parts.append(types.Part.from_text("{The rubric code output is} " + str(rubric_output)))
+                parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
             target_agent = agent.student_assist_agent
                 
         # Create a message from the query
