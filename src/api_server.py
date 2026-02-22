@@ -487,9 +487,18 @@ async def assist(query_body: AssistRequest, request: Request):
 
     try:
         # Use a consistent session ID for the agent conversation
-        if 'agent_session_id' in request.session:
-            session_id = request.session.get('agent_session_id')
-        else:
+        session_id = request.session.get('agent_session_id')
+        if session_id:
+            # Verify the session still exists (DB may have been wiped on redeploy)
+            existing = await config.session_service.get_session(
+                app_name=config.runner_student.app_name,
+                user_id=user_gmail,
+                session_id=session_id,
+            )
+            if not existing:
+                session_id = None
+
+        if not session_id:
             session_id = str(uuid.uuid4())
             request.session['agent_session_id'] = session_id
             await config.session_service.create_session(
@@ -590,10 +599,17 @@ async def grade(query_body: GradeRequest, request: Request):
 
     try:
         # Use a consistent session ID for the agent conversation
+        session_id = request.session.get('agent_session_id')
+        if session_id:
+            existing = await config.session_service.get_session(
+                app_name=runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if not existing:
+                session_id = None
 
-        if 'agent_session_id' in request.session:
-            session_id = request.session.get('agent_session_id')
-        else:
+        if not session_id:
             session_id = str(uuid.uuid4())
             request.session['agent_session_id'] = session_id
             await config.session_service.create_session(
