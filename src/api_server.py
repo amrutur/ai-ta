@@ -553,7 +553,7 @@ async def assist(query_body: AssistRequest, request: Request):
             if question is None:
                 raise HTTPException(status_code=404, detail="Question not found in rubric for this course and notebook.")
             rubric_answer = courses[course_handle][query_body.notebook_id]['answers'].get(str(qnum))
-            rubric_output = courses[course_handle][query_body.notebook_id]['outputs'].get(str(qnum))
+            rubric_output = courses[course_handle][query_body.notebook_id].get('outputs', {}).get(str(qnum))
             
             if context is not None:
                 parts.append(types.Part.from_text(text="{The context is:} " + str(context)))
