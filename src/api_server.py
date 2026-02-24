@@ -78,7 +78,8 @@ from database import (
     save_rubric,
     get_marks_list,
     get_course_data,
-    load_course_info_from_db
+    load_course_info_from_db,
+    load_notebooks_from_db
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from agent_service import run_agent_and_get_response, score_question, evaluate
@@ -144,6 +145,12 @@ async def load_courses_cache():
             courses[course_handle] = course_data
             courses[course_handle].setdefault('isactive_tutor', True)
             courses[course_handle].setdefault('isactive_eval', False)
+            # Load rubric notebooks for this course into the cache
+            notebooks = await load_notebooks_from_db(config.db, course_handle)
+            for notebook_id, notebook_data in notebooks.items():
+                courses[course_handle][notebook_id] = notebook_data
+            if notebooks:
+                logging.info(f"  Course '{course_handle}': loaded {len(notebooks)} rubric notebook(s)")
         logging.info(f"Loaded {len(all_courses)} courses into cache on startup")
     except Exception as e:
         logging.error(f"Failed to load courses cache on startup: {e}")
@@ -1072,7 +1079,7 @@ async def upload_rubric_api(
                                              'outputs':query_body.outputs} 
 
         #now save the rubric in the databse as well
-        await save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers)
+        await save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers, query_body.outputs)
 
         return AddRubricResponse(
             response=f"Successfully added rubric '{query_body.notebook_id}' to course '{course_handle}'"

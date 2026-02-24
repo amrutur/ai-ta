@@ -70,8 +70,26 @@ async def update_course_info(db, course_handle:str, keyname: str, value: Any):
         logging.error(f"An unexpected error occurred in update_course_info: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
 
-async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict):
-    ''' Save the notebook's rubric information to the Firestore database under Notebooks 
+async def load_notebooks_from_db(db, course_handle: str) -> dict:
+    '''Load all notebook (rubric) documents from a course's Notebooks subcollection.
+
+    Returns:
+        Dictionary mapping notebook_id -> notebook_data dict
+    '''
+    notebooks = {}
+    try:
+        notebooks_ref = db.collection(u'courses').document(course_handle).collection(u'Notebooks')
+        async for doc in notebooks_ref.stream():
+            doc_data = doc.to_dict()
+            # Exclude internal fields that aren't needed in the cache
+            doc_data.pop('last_updated', None)
+            notebooks[doc.id] = doc_data
+    except Exception as e:
+        logging.error(f"Failed to load notebooks for course '{course_handle}': {e}")
+    return notebooks
+
+async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict, outputs:dict):
+    ''' Save the notebook's rubric information to the Firestore database under Notebooks
         subcollection for this course.
 
         Holds the context, questions, and answers for the rubric notebook, which will be used by the grading agent when grading student submissions. Also saves the max_marks for the notebook, which is used to calculate the final grade percentage for the submission.
@@ -83,6 +101,7 @@ async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, 
             u'context': context,
             u'questions': questions,
             u'answers': answers,
+            u'outputs': outputs,
             u'last_updated': firestore.SERVER_TIMESTAMP
         })
     except google_exceptions.NotFound:
