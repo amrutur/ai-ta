@@ -191,21 +191,21 @@ async def add_student_if_not_exists(db, course_handle, student_id, student_name)
         student_ref = course_ref.collection(u'Students').document(student_id)
         student_doc = await student_ref.get()
         if not student_doc.exists:
-            logging.info(f"Student '{student_id}' not in course {course_id}. Adding now.")
+            logging.info(f"Student '{student_id}' not in course {course_handle}. Adding now.")
             await student_ref.set({
                 u'name': student_name,
                 })
     except google_exceptions.NotFound:
-        # Note: In Firestore, .get() on a non-existent ID usually returns 
+        # Note: In Firestore, .get() on a non-existent ID usually returns
         # a 'doc.exists=False' snapshot rather than raising this error.
         # But this is useful for missing Collections or wrong Database IDs.
         logging.error(f"Firestore collection/resource not found.")
         raise
-        
+
     except google_exceptions.PermissionDenied:
         logging.error("Check your Service Account permissions for ai-ta-486602.")
         raise HTTPException(status_code=500, detail="Database access denied.")
-        
+
     except google_exceptions.GoogleAPICallError as e:
         # Catch-all for other network/API issues (timeouts, 500s from Google)
         logging.error(f"A network error occurred with Firestore: {e}")
@@ -213,7 +213,7 @@ async def add_student_if_not_exists(db, course_handle, student_id, student_name)
 
     except CourseNotFoundError as e:
         # Catching your own custom exception raised inside the try block
-        logging.info(f"User requested non-existent course: {course_id}")
+        logging.info(f"User requested non-existent course: {course_handle}")
         raise HTTPException(status_code=404, detail=e.message)
     except Exception as e:
         logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
