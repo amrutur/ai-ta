@@ -1068,13 +1068,14 @@ async def upload_rubric_api(
         courses[course_handle][query_body.notebook_id]={'context':query_body.context,
                                              'questions':query_body.questions,
                                              'max_marks': query_body.max_marks,
-                                             'answers':query_body.answers} 
+                                             'answers':query_body.answers,
+                                             'outputs':query_body.outputs} 
 
         #now save the rubric in the databse as well
         await save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers)
 
         return AddRubricResponse(
-            response=f"Successfully added rubric '{query_body.rubric_name}' to course '{course_handle}'"
+            response=f"Successfully added rubric '{query_body.notebook_id}' to course '{course_handle}'"
         )
     except Exception as e:
         logging.error("An exception occurred during add_rubric_api: %s", e)
