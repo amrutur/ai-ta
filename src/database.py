@@ -213,6 +213,8 @@ async def add_student_if_not_exists(db, course_handle, student_id, student_name)
             logging.info(f"Student '{student_id}' not in course {course_handle}. Adding now.")
             await student_ref.set({
                 u'name': student_name,
+                "initialized": True,
+                "created_at": firestore.SERVER_TIMESTAMP
                 })
     except google_exceptions.NotFound:
         # Note: In Firestore, .get() on a non-existent ID usually returns
@@ -237,26 +239,124 @@ async def add_student_if_not_exists(db, course_handle, student_id, student_name)
     except Exception as e:
         logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
-    
-async def add_answer_notebook(db, course_id, student_id, student_name, notebook_id, answer_notebook, answer_hash):
-    '''Add the answer notebook to the student's record.'''
+
+async def add_instructor_notebook_if_not_exists(db, course_handle, notebook_id):
+    '''Add the instructor interactions to the course's notebook subcollection if not already present.
+
+    Path: courses/{course_handle}/Notebooks/{notebook_id}
+    '''
     try:
-        course_ref = db.collection(u'courses').document(course_id)
+        course_ref = db.collection(u'courses').document(course_handle)
         course_doc = await course_ref.get()
         if not course_doc.exists:
-            logging.error(f"Course with ID '{course_id}' not found when trying to add student '{student_id}'.")
-            raise CourseNotFoundError(course_id)       
+            logging.error(f"Course:'{course_handle}' not found when trying to add Notebook '{notebook_id}'.")
+            raise CourseNotFoundError(course_handle)       
+        notebook_ref = course_ref.collection(u'Notebooks').document(notebook_id)
+        notebook_doc = await notebook_ref.get()
+        if not notebook_doc.exists:
+            logging.info(f"Notebook '{notebook_id}' not in course {course_handle}. Adding now.")
+            await notebook_ref.set({
+                "initialized": True,
+                "created_at": firestore.SERVER_TIMESTAMP
+                })
+    except google_exceptions.NotFound:
+        # Note: In Firestore, .get() on a non-existent ID usually returns
+        # a 'doc.exists=False' snapshot rather than raising this error.
+        # But this is useful for missing Collections or wrong Database IDs.
+        logging.error(f"Firestore collection/resource not found.")
+        raise
+
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_handle}")
+        raise HTTPException(status_code=404, detail=e.message)
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")
+
+async def add_student_notebook_if_not_exists(db, course_handle, student_id, student_name, notebook_id):
+    '''Add the student interactions to the student's notebook subcollection if not already present.
+
+    Path: courses/{course_handle}/Students/{student_id}/Notebooks/{notebook_id}
+    '''
+    try:
+        course_ref = db.collection(u'courses').document(course_handle)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            logging.error(f"Course:'{course_handle}' not found when trying to add Notebook '{notebook_id}'.")
+            raise CourseNotFoundError(course_handle)       
         student_ref = course_ref.collection(u'Students').document(student_id)
         student_doc = await student_ref.get()
         if not student_doc.exists:
-            logging.info(f"Student '{student_id}' not in course {course_id}. Adding now.")
+            logging.info(f"Student '{student_id}' not in course {course_handle}. Adding now.")
             await student_ref.set({
                 u'name': student_name,
+                "initialized": True,
+                "created_at": firestore.SERVER_TIMESTAMP
                 })
-        notebook_ref = student_ref.collection(u'notebooks').document(notebook_id)
+        notebook_ref = student_ref.collection(u'Notebooks').document(notebook_id)
+        notebook_doc = await notebook_ref.get()
+        if not notebook_doc.exists:
+            logging.info(f"Notebook '{notebook_id}' not in course {course_handle}/{student_id}. Adding now.")
+            await notebook_ref.set({
+                "initialized": True,
+                "created_at": firestore.SERVER_TIMESTAMP
+                })
+
+    except google_exceptions.NotFound:
+        # Note: In Firestore, .get() on a non-existent ID usually returns
+        # a 'doc.exists=False' snapshot rather than raising this error.
+        # But this is useful for missing Collections or wrong Database IDs.
+        logging.error(f"Firestore collection/resource not found.")
+        raise
+
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions for ai-ta-486602.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+
+    except google_exceptions.GoogleAPICallError as e:
+        # Catch-all for other network/API issues (timeouts, 500s from Google)
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+
+    except CourseNotFoundError as e:
+        # Catching your own custom exception raised inside the try block
+        logging.info(f"User requested non-existent course: {course_handle}")
+        raise HTTPException(status_code=404, detail=e.message)
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in add_user_if_not_exists: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while accessing the database.")  
+
+async def upload_student_notebook(db, course_handle, student_id, student_name, notebook_id, answer_notebook, answer_hash):
+    '''Add the answer notebook to the student's record.'''
+    try:
+        course_ref = db.collection(u'courses').document(course_handle)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            logging.error(f"Course with handle '{course_handle}' not found when trying to upload student answer book '{student_id}:{notebook_id}'.")
+            raise CourseNotFoundError(course_handle)       
+        student_ref = course_ref.collection(u'Students').document(student_id)
+        student_doc = await student_ref.get()
+        if not student_doc.exists:
+            logging.info(f"Student '{student_id}' not in course {course_handle}. Adding now.")
+            await student_ref.set({
+                u'name': student_name,
+                "initialized": True,
+                "created_at": firestore.SERVER_TIMESTAMP
+                })
+        notebook_ref = student_ref.collection(u'Notebooks').document(notebook_id)
         notebook_doc = await notebook_ref.get()
         if notebook_doc.exists:
-            logging.warning(f"Notebook with ID '{notebook_id}' already exists for student '{student_id}' in course '{course_id}'. Overwriting the existing notebook.")
+            logging.warning(f"Notebook with ID '{notebook_id}' already exists for student '{student_id}' in course '{course_handle}'. Overwriting the existing notebook.")
 
         await notebook_ref.set({
             u'answer_notebook': answer_notebook,

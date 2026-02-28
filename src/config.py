@@ -21,7 +21,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 from google.adk import Runner
-from google.adk.sessions import DatabaseSessionService
+#from google.adk.sessions import DatabaseSessionService
+from google.adk.sessions import FirestoreSessionService
 
 from sendgrid import SendGridAPIClient
 
@@ -283,24 +284,34 @@ if _config.get("gemini_api_key"):
 
 # Create a database session service
 # Use aiosqlite for async support (required for Cloud Run deployment)
-session_service = DatabaseSessionService(
-    db_url="sqlite+aiosqlite:///agent_sessions.db"
+#session_service = DatabaseSessionService(
+#    db_url="sqlite+aiosqlite:///agent_sessions.db"
+#)
+student_session_service = FirestoreSessionService(
+    project_id=_config["project_id"],
+    database_id=_config["database_id"],
+    collection_template="courses/{course_handle}/Students/{user_id}/Notebooks/{session_id}"
 )
 
+instructor_session_service = FirestoreSessionService(
+    project_id=_config["project_id"],
+    database_id=_config["database_id"],
+    collection_template="courses/{course_handle}/Notebooks/{session_id}"
+)
 # Create runners — one per agent, since Runner.run_async() does not
 # support overriding the agent at call time.
 runner_instructor = Runner(
     app_name="ai_ta",
     agent=agent.instructor_assist_agent,
-    session_service=session_service
+    session_service=instructor_session_service
 )
 runner_student = Runner(
     app_name="ai_ta",
     agent=agent.student_assist_agent,
-    session_service=session_service
+    session_service=student_session_service
 )
 runner_scoring = Runner(
     app_name="ai_ta",
     agent=agent.scoring_assist_agent,
-    session_service=session_service
+    session_service=instructor_session_service
 )   

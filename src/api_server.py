@@ -69,7 +69,9 @@ from auth import (
 from database import (
     get_student_list,
     add_student_if_not_exists,
-    add_answer_notebook,
+    add_instructor_notebook_if_not_exists,
+    add_student_notebook_if_not_exists,
+    upload_student_notebook,
     update_course_info,
     update_marks,
     fetch_grader_response,
@@ -486,6 +488,11 @@ async def assist(query_body: AssistRequest, request: Request):
 
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
+    #this will be used to create the interaction session for the chat in the db
+    initial_state  = {
+        'course_handle': course_handle
+    }
+
     is_instructor = is_authorized(user_gmail, course_handle)
 
     # Check if tutor is disabled by instructor
@@ -493,26 +500,6 @@ async def assist(query_body: AssistRequest, request: Request):
         raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
 
     try:
-        # Use a consistent session ID for the agent conversation
-        session_id = request.session.get('agent_session_id')
-        if session_id:
-            # Verify the session still exists (DB may have been wiped on redeploy)
-            existing = await config.session_service.get_session(
-                app_name=config.runner_student.app_name,
-                user_id=user_gmail,
-                session_id=session_id,
-            )
-            if not existing:
-                session_id = None
-
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            request.session['agent_session_id'] = session_id
-            await config.session_service.create_session(
-                    app_name=config.runner_student.app_name,
-                    user_id=user_gmail,
-                    session_id=session_id
-                )
         parts = []
         context = query_body.context
         question=query_body.question.get("question", "")
@@ -520,7 +507,27 @@ async def assist(query_body: AssistRequest, request: Request):
         answer = query_body.answer
         output  = query_body.output
         qnum = query_body.qnum
+        notebook_id = query_body.notebook_id
+
+
         if is_instructor:
+            
+            add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
+
+            #check if the chat interaction session alreay exists. If not create
+            existing = await config.instructor_session_service.get_session(
+                app_name=config.runner_instructor.app_name,
+                user_id=user_gmail,
+                session_id=notebook_id,
+            )
+
+            if not existing:
+                await config.instructor_session_service.create_session(
+                    app_name=config.runner_instructor.app_name,
+                    user_id=user_gmail,
+                    session_id=notebook_id,
+                    state=initial_state
+                )
             # the insrtuctor is asking the agent - so we should provide the full context, question, 
             # instructor's answer and output to get better suggestions from the agent for grading and 
             # providing feedback to the students. The instructor can also ask the agent to check if 
@@ -544,16 +551,32 @@ async def assist(query_body: AssistRequest, request: Request):
             # if available to provide better assistance, but we should not use the instructor's 
             # answer and output in that case as it may give away the answer to the student
             
-            await add_student_if_not_exists(config.db, course_handle, user_gmail, user_name) #ensure the student is added to the course in the database
-            if query_body.notebook_id not in courses[course_handle]:
+            if notebook_id not in courses[course_handle]:
                 raise HTTPException(status_code=404, detail="Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first.")
+
+            await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id) #ensure the student is added to the course in the database
+            #check if the chat interaction session alreay exists. If not create
+
+            existing = await config.student_session_service.get_session(
+                app_name=config.runner_student.app_name,
+                user_id=user_gmail,
+                session_id=notebook_id,
+            )
+
+            if not existing:
+                await config.student_session_service.create_session(
+                    app_name=config.runner_student.app_name,
+                    user_id=user_gmail,
+                    session_id=notebook_id,
+                    state=initial_state
+                )
             #get the context and question from rubric (stored in the cache)
-            context = courses[course_handle][query_body.notebook_id]['context'].get(str(qnum))
-            question = courses[course_handle][query_body.notebook_id]['questions'].get(str(qnum))
+            context = courses[course_handle][notebook_id]['context'].get(str(qnum))
+            question = courses[course_handle][notebook_id]['questions'].get(str(qnum))
             if question is None:
                 raise HTTPException(status_code=404, detail="Question not found in rubric for this course and notebook.")
-            rubric_answer = courses[course_handle][query_body.notebook_id]['answers'].get(str(qnum))
-            rubric_output = courses[course_handle][query_body.notebook_id].get('outputs', {}).get(str(qnum))
+            rubric_answer = courses[course_handle][notebook_id]['answers'].get(str(qnum))
+            rubric_output = courses[course_handle][notebook_id].get('outputs', {}).get(str(qnum))
             
             if context is not None:
                 parts.append(types.Part.from_text(text="{The context is:} " + str(context)))
@@ -575,7 +598,7 @@ async def assist(query_body: AssistRequest, request: Request):
         )
 
         # Attempt to get the response using the current session ID
-        response_text = await run_agent_and_get_response(session_id, user_gmail, content, runner)
+        response_text = await run_agent_and_get_response(notebook_id, user_gmail, content, runner)
 
         if not response_text:
             raise HTTPException(status_code=500, detail="Failed to generate response")
@@ -605,25 +628,19 @@ async def grade(query_body: GradeRequest, request: Request):
     user_name = query_body.user_name if query_body.user_name else "Anonymous User"
 
     try:
-        # Use a consistent session ID for the agent conversation
-        session_id = request.session.get('agent_session_id')
-        if session_id:
-            existing = await config.session_service.get_session(
-                app_name=runner.app_name,
-                user_id=user_id,
-                session_id=session_id,
+        existing = await config.student_session_service.get_session(
+                app_name=config.runner_student.app_name,
+                user_id=user_gmail,
+                session_id=notebook_id,
             )
-            if not existing:
-                session_id = None
 
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            request.session['agent_session_id'] = session_id
-            await config.session_service.create_session(
-                    app_name=runner.app_name,
-                    user_id=user_id,
-                    session_id=session_id
-                )
+        if not existing:
+            await config.student_session_service.create_session(
+                    app_name=config.runner_student.app_name,
+                    user_id=user_gmail,
+                    session_id=notebook_id,
+                    state=initial_state
+            )
 
         if not query_body.question:
             raise HTTPException(status_code=400, detail="Question not provided")
@@ -1054,7 +1071,7 @@ async def upload_rubric_api(
 ):
     '''
     Add a rubric to a course.
-    This endpoint is only accessible to platform administrators.
+    This endpoint is only accessible to course instructor/platform administrators.
     The questions cells, the answer cells and the context cells
     (everything other than the question and aswer cells)
     The context is auto-regressive (context for each question is all cells
