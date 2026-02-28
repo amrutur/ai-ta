@@ -381,13 +381,13 @@ async def upload_student_notebook(db, course_handle, student_id, student_name, n
 
     except CourseNotFoundError as e:
         # Catching your own custom exception raised inside the try block
-        logging.info(f"User requested non-existent course: {course_id}")
+        logging.info(f"User requested non-existent course: {course_handle}")
         raise HTTPException(status_code=404, detail=str(e))
     except StudentNotEnrolledError as e:
-        logging.info(f"User '{student_id}' tried to submit notebook for course '{course_id}' they are not enrolled in.")
-        raise HTTPException(status_code=403, detail=str(e)) 
+        logging.info(f"User '{student_id}' tried to submit notebook for course '{course_handle}' they are not enrolled in.")
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
-        logging.error(f"Error in  add_answer_notebook: {e}")
+        logging.error(f"Error in upload_student_notebook: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error while adding answer notebook.")
 
 async def update_marks(db, course_id, student_id, notebook_id, total_marks, max_marks, grader_response):

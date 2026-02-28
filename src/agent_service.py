@@ -15,7 +15,7 @@ import asyncio
 
 from fastapi import HTTPException
 from google.adk import Runner
-from google.adk.sessions import DatabaseSessionService
+from google.adk.sessions import FirestoreSessionService
 from google.genai import types
 
 async def run_agent_and_get_response(current_session_id: str, user_id: str, content: types.Content, runner: Runner) -> str:
@@ -37,7 +37,7 @@ async def run_agent_and_get_response(current_session_id: str, user_id: str, cont
     return text
 
 
-async def score_question(question: str, answer: str, rubric: str, runner: Runner, session_service: DatabaseSessionService, user_id: str) -> tuple[float, str]:
+async def score_question(question: str, answer: str, rubric: str, runner: Runner, session_service: FirestoreSessionService, user_id: str) -> tuple[float, str]:
     '''
     Score a single question-answer with the rubric using the scoring agent.
 
@@ -132,7 +132,7 @@ async def get_rubric_answers(rubric_cells:list) -> dict:
             i += 1
     return answers
 
-async def evaluate(answer_json, rubric_json, runner: Runner, session_service: DatabaseSessionService, user_id: str) -> tuple[float, float, int, dict]:
+async def evaluate(answer_json, rubric_json, runner: Runner, session_service: FirestoreSessionService, user_id: str) -> tuple[float, float, int, dict]:
     '''Evaluate the submitted notebook by grading all questions using the scoring agent.'''
     try:
         acells = answer_json['cells']

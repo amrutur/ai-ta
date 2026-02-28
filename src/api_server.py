@@ -84,7 +84,6 @@ from database import (
     load_notebooks_from_db
 )
 from drive_utils import load_notebook_from_google_drive_sa
-from agent_service import run_agent_and_get_response, score_question, evaluate
 from email_service import send_email
 import datetime
 from collections import defaultdict
@@ -512,7 +511,7 @@ async def assist(query_body: AssistRequest, request: Request):
 
         if is_instructor:
             
-            add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
+            await add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
 
             #check if the chat interaction session alreay exists. If not create
             existing = await config.instructor_session_service.get_session(
@@ -623,25 +622,9 @@ async def grade(query_body: GradeRequest, request: Request):
     if ('user' in request.session) : #user is logged and authenticated
         user_id = request.session['user']['id']
     else:
-        user_id = query_body.user_email if query_body.user_email else "anonymous_user"
-
-    user_name = query_body.user_name if query_body.user_name else "Anonymous User"
+        user_id = query_body.student_id
 
     try:
-        existing = await config.student_session_service.get_session(
-                app_name=config.runner_student.app_name,
-                user_id=user_gmail,
-                session_id=notebook_id,
-            )
-
-        if not existing:
-            await config.student_session_service.create_session(
-                    app_name=config.runner_student.app_name,
-                    user_id=user_gmail,
-                    session_id=notebook_id,
-                    state=initial_state
-            )
-
         if not query_body.question:
             raise HTTPException(status_code=400, detail="Question not provided")
 
@@ -649,7 +632,7 @@ async def grade(query_body: GradeRequest, request: Request):
         answer = query_body.answer + "." if query_body.answer else "No answer."
         rubric = query_body.rubric if query_body.rubric else "No rubric"
 
-        marks, response_text = await score_question(question, answer, rubric, runner, config.session_service, user_id)
+        marks, response_text = await score_question(question, answer, rubric, runner, config.instructor_session_service, user_id)
 
         return GradeResponse(
             response=response_text,
@@ -665,94 +648,78 @@ async def grade(query_body: GradeRequest, request: Request):
 
 @app.post("/eval", response_model=EvalResponse)
 async def eval_submission(query_body: EvalRequest, request: Request):
-    '''Evaluate the submitted notebook by grading all questions using the scoring agent'''
+    '''Evaluate the submitted notebook by grading all questions using the scoring agent.
 
-    # Check if eval API is enabled by instructor
-    if not config.isactive_eval:
-        raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive")
+    The client sends pre-parsed questions, answers, and outputs from the student's notebook.
+    The rubric (expected answers) is loaded from the server-side course cache.
+    Each question is scored individually using the scoring agent.
+    '''
+
+    user = get_current_user(request)
+    user_gmail = user.get('email')
+    user_name = user.get('name')
+
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+
+    # Check if eval API is enabled for this course
+    if not courses[course_handle].get('isactive_eval', False):
+        raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive for this course.")
 
     runner = config.runner_scoring
+    notebook_id = query_body.notebook_id
 
     try:
+        # Get rubric data from the course cache
+        rubric_data = courses[course_handle].get(notebook_id)
+        if not rubric_data:
+            raise HTTPException(status_code=404, detail=f"Rubric data not found for notebook '{notebook_id}' in course '{course_handle}'.")
 
-        if not query_body.user_name or not query_body.user_email or not query_body.answer_notebook or not query_body.rubric_link or not query_body.answer_hash:
-            raise HTTPException(status_code=400, detail="Incomplete request. Please provide user_name, user_email, answer_notebook, asnwer_hash and rubric_link")
+        rubric_questions = rubric_data.get('questions', {})
+        rubric_answers = rubric_data.get('answers', {})
+        max_marks_total = rubric_data.get('max_marks', 0.0)
 
-        user_email = query_body.user_email
-        user_name = query_body.user_name
+        # Ensure student record exists
+        await add_student_if_not_exists(config.db, course_handle, user_gmail, user_name)
+        await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id)
 
-        answer_json = query_body.answer_notebook
-        answer_hash = query_body.answer_hash
-        rubric_link = query_body.rubric_link
+        # Score each question
+        total_marks = 0.0
+        num_questions = 0
+        graded = {}
 
-        #extract the cells from the notebook
-        if ('ipynb' in answer_json): #remove one hierarchy if present
-            answer_json = answer_json['ipynb']
+        for qnum_str, student_answer in query_body.answers.items():
+            rubric_question = rubric_questions.get(qnum_str, '')
+            rubric_answer = rubric_answers.get(qnum_str, '')
 
-        answer_cells = answer_json['cells'] if 'cells' in answer_json else []
-        logging.debug(f"Number of answer cells: {len(answer_cells)}")
-        if len(answer_cells) == 0:
-            logging.debug(f"answer_json={answer_json}")
-        #extract google validated name, and id.
-        #This is stored in the metadata of the execution info for any code  cell of the notebook
-        google_user_name = None
-        google_user_id = None
-        for i in range(len(answer_cells)):
-            cell = answer_cells[i]
-            if (cell.get('cell_type') == 'code' and
-                'metadata' in cell and
-                'executionInfo' in cell.get('metadata', {}) and
-                cell['metadata']['executionInfo'].get('status') == 'ok'):
-                    google_user_name = cell['metadata']['executionInfo']['user']['displayName']
-                    google_user_id = cell['metadata']['executionInfo']['user']['userId']
-                    break
+            if not rubric_question:
+                logging.warning(f"No rubric question found for Q{qnum_str}. Skipping.")
+                continue
 
-        if not google_user_name:
-            google_user_name = "Unknown"
-            google_user_id = "Unknown"
-            logging.warning("Warning: Could not extract google user name and id from notebook metadata.Need to run at least one code cell")
+            num_questions += 1
+            marks, response_text = await score_question(
+                rubric_question, str(student_answer), str(rubric_answer),
+                runner, config.instructor_session_service, user_gmail
+            )
+            total_marks += marks
+            graded[qnum_str] = {'marks': marks, 'response': response_text}
+            logging.info(f"Graded Q{qnum_str}: {marks} marks")
 
-        logging.info(f"google_user_name={google_user_name}, google_user_id={google_user_id}")
+        logging.info(f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions.")
 
-        await add_student_if_not_exists(config.db, query_body.course_handle, google_user_id, user_name, user_email, google_user_name)
+        # Store marks in database
+        await update_marks(config.db, course_handle, user_gmail, notebook_id, total_marks, max_marks_total, graded)
 
-        await add_answer_notebook(config.db, google_user_id, query_body.notebook_id, query_body.answer_notebook, answer_hash)
-
-        # Read rubric notebook using the application's service account, not the logged-in user's credentials.
-        logging.info(f"rubric link is {query_body.rubric_link}")
-        rubric_content = await asyncio.to_thread(
-            load_notebook_from_google_drive_sa, config.firestore_cred_dict, str(rubric_link)
+        return EvalResponse(
+            response=f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions."
         )
-        if rubric_content is None:
-            raise HTTPException(
-                status_code=404, detail=f"{user_name} ({user_email}) Rubric notebook '{rubric_link}' not found. Ensure it is shared with the service account: {config.firestore_cred_dict.get('client_email')}"
-            )
-        try:
-            # .ipynb files are JSON, so we can return them as JSON
-            rubric_json = json.loads(rubric_content)
-        except json.JSONDecodeError:
-            # Or return as plain text if it's not valid JSON for some reason
-            return HTMLResponse(content=f"<pre>Could not parse notebook as JSON. Raw content:\n</pre>")
 
-        try:
-            total_marks, max_marks, num_questions, graded = await evaluate(answer_json, rubric_json, runner, config.session_service, google_user_id)
-
-            logging.info(f"{google_user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks} for {num_questions} questions.")
-
-            await update_marks(config.db, google_user_id, query_body.notebook_id, total_marks, max_marks, graded)
-
-            return EvalResponse(
-                response=google_user_name + ": You have successfully submitted notebook for evaluation. Graded answer will be sent to your email.",
-                marks=0.0
-            )
-        except Exception as e:
-            # By logging the exception with its traceback, you can see the root cause in your server logs.
-            logging.error("An exception occurred during query processing: %s", e)
-            traceback.print_exc()
-
+    except HTTPException:
+        raise
     except Exception as e:
-        # By logging the exception with its traceback, you can see the root cause in your server logs.
-        logging.error("An exception occurred during query processing: %s", e)
+        logging.error("An exception occurred during evaluation: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
