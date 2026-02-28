@@ -22,7 +22,8 @@ from firebase_admin import credentials, firestore
 
 from google.adk import Runner
 #from google.adk.sessions import DatabaseSessionService
-from google.adk.sessions import FirestoreSessionService
+#from google.adk.sessions import FirestoreSessionService
+from adk.ext.sessions import FirestoreSessionService
 
 from sendgrid import SendGridAPIClient
 
