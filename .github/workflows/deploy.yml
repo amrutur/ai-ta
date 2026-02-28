@@ -1,0 +1,69 @@
+name: Deploy to Cloud Run
+
+# Only deploy on push to main (after CI passes)
+on:
+  push:
+    branches: [main]
+
+# -------------------------------------------------------------------------
+# SETUP REQUIRED:
+#
+# 1. Create a GCP service account with these roles:
+#    - Cloud Run Admin
+#    - Artifact Registry Writer
+#    - Service Account User
+#
+# 2. Set up Workload Identity Federation (recommended) or a service
+#    account key.  See:
+#    https://github.com/google-github-actions/auth#setting-up-workload-identity-federation
+#
+# 3. Add these GitHub repository secrets:
+#    - GCP_PROJECT_ID:        Your GCP project ID
+#    - GCP_REGION:            e.g. us-central1
+#    - GCP_SA_EMAIL:          Deploy service account email
+#    - GCP_WORKLOAD_IDENTITY: Workload Identity Provider resource name
+#                             (or use GCP_SA_KEY for key-based auth)
+# -------------------------------------------------------------------------
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Authenticate to Google Cloud ---
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+          # Alternative: key-based auth (less secure)
+          # credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # --- Build and push container ---
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
+
+      - name: Build and push
+        run: |
+          IMAGE=${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/cloud-run-source-deploy/ai-ta:${{ github.sha }}
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      # --- Deploy to Cloud Run ---
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE=${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/cloud-run-source-deploy/ai-ta:${{ github.sha }}
+          gcloud run deploy ai-ta \
+            --image $IMAGE \
+            --region ${{ secrets.GCP_REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080

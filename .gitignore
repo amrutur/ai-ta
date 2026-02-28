@@ -1,9 +1,18 @@
-#Environment variables
+# Environment variables
 .env
 
-#python cache
+# Python cache
 __pycache__/
+*.pyc
 
-#data bases and logs
+# Databases and logs
 *.db
 *.log
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Linting
+.ruff_cache/
