@@ -525,7 +525,7 @@ async def assist(query_body: AssistRequest, request: Request):
                     app_name=config.runner_instructor.app_name,
                     user_id=user_gmail,
                     session_id=notebook_id,
-                    state=initial_state
+                    course_handle=course_handle
                 )
             # the insrtuctor is asking the agent - so we should provide the full context, question, 
             # instructor's answer and output to get better suggestions from the agent for grading and 

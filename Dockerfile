@@ -1,7 +1,6 @@
 # Dockerfile for ADK agent system
 FROM python:3.13-slim-bookworm
 
-
 WORKDIR /app
 
 # Copy requirements and install dependencies

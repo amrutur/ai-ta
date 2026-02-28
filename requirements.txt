@@ -1,5 +1,4 @@
 google-adk>=1.12.0
-adk-ext[firestore]>=0.1.0
 google-cloud-firestore
 google-generativeai>=0.8.5
 fastapi>=0.95.0

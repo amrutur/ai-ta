@@ -22,8 +22,7 @@ from firebase_admin import credentials, firestore
 
 from google.adk import Runner
 #from google.adk.sessions import DatabaseSessionService
-#from google.adk.sessions import FirestoreSessionService
-from adk.ext.sessions import FirestoreSessionService
+import firestore_service
 
 from sendgrid import SendGridAPIClient
 
@@ -240,7 +239,7 @@ _config = load_app_config()
 # Initialize Firebase Admin with loaded credentials
 try:
     cred = credentials.Certificate(_config["firestore_cred_dict"])
-    app = firebase_admin.initialize_app(cred)
+    app = firebase_admin.initialize_app(cred)git+https://github.com/google/adk-python-community.git
     # firebase_admin.firestore has no async_client() helper, so construct
     # the AsyncClient directly using the app's service-account credentials.
     db = firestore.AsyncClient(
@@ -288,13 +287,13 @@ if _config.get("gemini_api_key"):
 #session_service = DatabaseSessionService(
 #    db_url="sqlite+aiosqlite:///agent_sessions.db"
 #)
-student_session_service = FirestoreSessionService(
+student_session_service = CustomFirestoreSessionService(
     project_id=_config["project_id"],
     database_id=_config["database_id"],
     collection_template="courses/{course_handle}/Students/{user_id}/Notebooks/{session_id}"
 )
 
-instructor_session_service = FirestoreSessionService(
+instructor_session_service = CustomFirestoreSessionService(
     project_id=_config["project_id"],
     database_id=_config["database_id"],
     collection_template="courses/{course_handle}/Notebooks/{session_id}"
