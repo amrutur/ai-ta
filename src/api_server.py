@@ -35,7 +35,7 @@ import json
 import uuid
 from typing import Dict, Any
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File, Form
 from fastapi.responses import  HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
@@ -85,6 +85,7 @@ from database import (
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from email_service import send_email
+from storage_utils import upload_blob
 import datetime
 from collections import defaultdict
 
@@ -1075,6 +1076,255 @@ async def upload_rubric_api(
         logging.error("An exception occurred during add_rubric_api: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+# ==================== Course Materials Upload ====================
+
+@app.get("/upload_course_materials", response_class=HTMLResponse)
+async def upload_course_materials_page(
+    course_id: str,
+    term_id: str,
+    institution_id: str,
+    request: Request
+):
+    '''
+    Serve a drag-and-drop file upload page for course materials.
+    Only accessible to course instructors or platform administrators.
+    '''
+    user = get_current_user(request)
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    user_gmail = user.get('email', '').lower()
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
+
+    course_name = courses[course_handle].get('course_name', course_id)
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Upload Course Materials - {course_name}</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }}
+            h1 {{ color: #333; }}
+            .info {{ background: #e8f4fd; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; color: #1a5276; }}
+            .drop-zone {{
+                border: 3px dashed #aaa; border-radius: 12px; padding: 60px 20px;
+                text-align: center; background: #fff; cursor: pointer;
+                transition: border-color 0.3s, background 0.3s;
+            }}
+            .drop-zone.dragover {{ border-color: #2196F3; background: #e3f2fd; }}
+            .drop-zone p {{ font-size: 18px; color: #666; margin: 0 0 10px; }}
+            .drop-zone small {{ color: #999; }}
+            #file-input {{ display: none; }}
+            #file-list {{ margin-top: 20px; }}
+            .file-item {{
+                background: #fff; padding: 10px 16px; margin: 6px 0; border-radius: 6px;
+                display: flex; justify-content: space-between; align-items: center;
+                border: 1px solid #ddd;
+            }}
+            .file-item .name {{ font-weight: bold; color: #333; }}
+            .file-item .size {{ color: #888; font-size: 13px; }}
+            .file-item .remove {{ color: #e74c3c; cursor: pointer; font-weight: bold; border: none; background: none; font-size: 18px; }}
+            #upload-btn {{
+                margin-top: 20px; padding: 12px 32px; background: #2196F3; color: #fff;
+                border: none; border-radius: 6px; font-size: 16px; cursor: pointer;
+                display: none;
+            }}
+            #upload-btn:hover {{ background: #1976D2; }}
+            #upload-btn:disabled {{ background: #aaa; cursor: not-allowed; }}
+            #status {{ margin-top: 16px; padding: 12px 16px; border-radius: 6px; display: none; }}
+            #status.success {{ display: block; background: #d4edda; color: #155724; }}
+            #status.error {{ display: block; background: #f8d7da; color: #721c24; }}
+            #status.progress {{ display: block; background: #fff3cd; color: #856404; }}
+        </style>
+    </head>
+    <body>
+        <h1>Upload Course Materials</h1>
+        <div class="info">
+            <strong>Course:</strong> {course_name} ({course_id})<br>
+            <strong>Term:</strong> {term_id} &nbsp; <strong>Institution:</strong> {institution_id}
+        </div>
+
+        <div class="drop-zone" id="drop-zone">
+            <p>Drag &amp; drop files here</p>
+            <small>or click to browse</small>
+        </div>
+        <input type="file" id="file-input" multiple>
+
+        <div id="file-list"></div>
+        <button id="upload-btn">Upload Files</button>
+        <div id="status"></div>
+
+        <script>
+            const dropZone = document.getElementById('drop-zone');
+            const fileInput = document.getElementById('file-input');
+            const fileList = document.getElementById('file-list');
+            const uploadBtn = document.getElementById('upload-btn');
+            const status = document.getElementById('status');
+            let selectedFiles = [];
+
+            dropZone.addEventListener('click', () => fileInput.click());
+
+            dropZone.addEventListener('dragover', (e) => {{
+                e.preventDefault();
+                dropZone.classList.add('dragover');
+            }});
+
+            dropZone.addEventListener('dragleave', () => {{
+                dropZone.classList.remove('dragover');
+            }});
+
+            dropZone.addEventListener('drop', (e) => {{
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+                addFiles(e.dataTransfer.files);
+            }});
+
+            fileInput.addEventListener('change', () => {{
+                addFiles(fileInput.files);
+                fileInput.value = '';
+            }});
+
+            function addFiles(files) {{
+                for (const f of files) {{
+                    if (!selectedFiles.some(s => s.name === f.name && s.size === f.size)) {{
+                        selectedFiles.push(f);
+                    }}
+                }}
+                renderFileList();
+            }}
+
+            function removeFile(index) {{
+                selectedFiles.splice(index, 1);
+                renderFileList();
+            }}
+
+            function formatSize(bytes) {{
+                if (bytes < 1024) return bytes + ' B';
+                if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+                return (bytes / 1048576).toFixed(1) + ' MB';
+            }}
+
+            function renderFileList() {{
+                fileList.innerHTML = '';
+                selectedFiles.forEach((f, i) => {{
+                    const div = document.createElement('div');
+                    div.className = 'file-item';
+                    div.innerHTML = '<span class="name">' + f.name + '</span>'
+                        + '<span class="size">' + formatSize(f.size) + '</span>'
+                        + '<button class="remove" onclick="removeFile(' + i + ')">&times;</button>';
+                    fileList.appendChild(div);
+                }});
+                uploadBtn.style.display = selectedFiles.length > 0 ? 'inline-block' : 'none';
+                status.className = '';
+                status.style.display = 'none';
+            }}
+
+            uploadBtn.addEventListener('click', async () => {{
+                if (selectedFiles.length === 0) return;
+                uploadBtn.disabled = true;
+                status.className = 'progress';
+                status.textContent = 'Uploading ' + selectedFiles.length + ' file(s)...';
+                status.style.display = 'block';
+
+                const formData = new FormData();
+                formData.append('course_id', '{course_id}');
+                formData.append('term_id', '{term_id}');
+                formData.append('institution_id', '{institution_id}');
+                for (const f of selectedFiles) {{
+                    formData.append('files', f);
+                }}
+
+                try {{
+                    const resp = await fetch('/upload_course_materials', {{
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    }});
+                    const data = await resp.json();
+                    if (resp.ok) {{
+                        status.className = 'success';
+                        status.textContent = data.message || 'Upload successful!';
+                        selectedFiles = [];
+                        renderFileList();
+                    }} else {{
+                        status.className = 'error';
+                        status.textContent = data.detail || 'Upload failed.';
+                    }}
+                }} catch (err) {{
+                    status.className = 'error';
+                    status.textContent = 'Network error: ' + err.message;
+                }}
+                uploadBtn.disabled = false;
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
+
+
+@app.post("/upload_course_materials")
+async def upload_course_materials(
+    request: Request,
+    course_id: str = Form(...),
+    term_id: str = Form(...),
+    institution_id: str = Form(...),
+    files: list[UploadFile] = File(...)
+):
+    '''
+    Upload course material files to the GCS bucket for the given course.
+    Only accessible to course instructors or platform administrators.
+    '''
+    user = get_current_user(request)
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    user_gmail = user.get('email', '').lower()
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
+
+    folder_name = courses[course_handle].get('folder_name', '')
+    if not folder_name:
+        raise HTTPException(status_code=500, detail="Course folder not configured")
+
+    # folder_name is "bucket_name/course_handle/" — split out the bucket and prefix
+    parts = folder_name.split('/', 1)
+    bucket_name = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ''
+
+    uploaded = []
+    errors = []
+
+    for f in files:
+        try:
+            file_data = await f.read()
+            destination = f"{prefix}{f.filename}"
+            upload_blob(bucket_name, destination, file_data, content_type=f.content_type)
+            uploaded.append(f.filename)
+            logging.info(f"Instructor {user_gmail} uploaded '{f.filename}' to course {course_handle}")
+        except Exception as e:
+            logging.error(f"Failed to upload '{f.filename}': {e}")
+            traceback.print_exc()
+            errors.append(f"{f.filename}: {str(e)}")
+
+    if errors and not uploaded:
+        raise HTTPException(status_code=500, detail=f"All uploads failed: {'; '.join(errors)}")
+
+    message = f"Successfully uploaded {len(uploaded)} file(s): {', '.join(uploaded)}"
+    if errors:
+        message += f". Failed: {'; '.join(errors)}"
+
+    return {"message": message}
+
 
 # ==================== Admin Endpoints ====================
 
