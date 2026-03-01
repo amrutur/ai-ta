@@ -1219,8 +1219,13 @@ async def upload_course_materials_page(request: Request):
                         + '&course_id=' + encodeURIComponent(courseId),
                         {{ credentials: 'same-origin' }}
                     );
-                    const data = await resp.json();
-                    if (resp.ok) {{
+                    if (!resp.ok) {{
+                        let detail = 'Server error (HTTP ' + resp.status + ')';
+                        try {{ const d = await resp.json(); detail = d.detail || detail; }} catch(e) {{}}
+                        status.className = 'error';
+                        status.textContent = detail;
+                    }} else {{
+                        const data = await resp.json();
                         courseInfo.innerHTML = '<strong>Course:</strong> ' + data.course_name
                             + ' (' + courseId + ')<br><strong>Term:</strong> ' + termId
                             + ' &nbsp; <strong>Institution:</strong> ' + institutionId;
@@ -1228,9 +1233,6 @@ async def upload_course_materials_page(request: Request):
                         dropZone.style.display = 'block';
                         courseForm.style.display = 'none';
                         status.style.display = 'none';
-                    }} else {{
-                        status.className = 'error';
-                        status.textContent = data.detail || 'Access denied.';
                     }}
                 }} catch (err) {{
                     status.className = 'error';
@@ -1317,15 +1319,17 @@ async def upload_course_materials_page(request: Request):
                         body: formData,
                         credentials: 'same-origin'
                     }});
-                    const data = await resp.json();
-                    if (resp.ok) {{
+                    if (!resp.ok) {{
+                        let detail = 'Server error (HTTP ' + resp.status + ')';
+                        try {{ const d = await resp.json(); detail = d.detail || detail; }} catch(e) {{}}
+                        status.className = 'error';
+                        status.textContent = detail;
+                    }} else {{
+                        const data = await resp.json();
                         status.className = 'success';
                         status.textContent = data.message || 'Upload successful!';
                         selectedFiles = [];
                         renderFileList();
-                    }} else {{
-                        status.className = 'error';
-                        status.textContent = data.detail || 'Upload failed.';
                     }}
                 }} catch (err) {{
                     status.className = 'error';
@@ -1377,48 +1381,55 @@ async def upload_course_materials(
     Upload course material files to the GCS bucket for the given course.
     Only accessible to course instructors or platform administrators.
     '''
-    user = get_current_user(request)
-    course_handle = make_course_handle(institution_id, term_id, course_id)
+    try:
+        user = get_current_user(request)
+        course_handle = make_course_handle(institution_id, term_id, course_id)
 
-    user_gmail = user.get('email', '').lower()
-    if not is_authorized(user_gmail, course_handle):
-        raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+        user_gmail = user.get('email', '').lower()
+        if not is_authorized(user_gmail, course_handle):
+            raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
 
-    if course_handle not in courses:
-        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
+        if course_handle not in courses:
+            raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
 
-    folder_name = courses[course_handle].get('folder_name', '')
-    if not folder_name:
-        raise HTTPException(status_code=500, detail="Course folder not configured")
+        folder_name = courses[course_handle].get('folder_name', '')
+        if not folder_name:
+            raise HTTPException(status_code=500, detail="Course folder not configured")
 
-    # folder_name is "bucket_name/course_handle/" — split out the bucket and prefix
-    parts = folder_name.split('/', 1)
-    bucket_name = parts[0]
-    prefix = parts[1] if len(parts) > 1 else ''
+        # folder_name is "bucket_name/course_handle/" — split out the bucket and prefix
+        parts = folder_name.split('/', 1)
+        bucket_name = parts[0]
+        prefix = parts[1] if len(parts) > 1 else ''
 
-    uploaded = []
-    errors = []
+        uploaded = []
+        errors = []
 
-    for f in files:
-        try:
-            file_data = await f.read()
-            destination = f"{prefix}{f.filename}"
-            upload_blob(bucket_name, destination, file_data, content_type=f.content_type)
-            uploaded.append(f.filename)
-            logging.info(f"Instructor {user_gmail} uploaded '{f.filename}' to course {course_handle}")
-        except Exception as e:
-            logging.error(f"Failed to upload '{f.filename}': {e}")
-            traceback.print_exc()
-            errors.append(f"{f.filename}: {str(e)}")
+        for f in files:
+            try:
+                file_data = await f.read()
+                destination = f"{prefix}{f.filename}"
+                upload_blob(bucket_name, destination, file_data, content_type=f.content_type)
+                uploaded.append(f.filename)
+                logging.info(f"Instructor {user_gmail} uploaded '{f.filename}' to course {course_handle}")
+            except Exception as e:
+                logging.error(f"Failed to upload '{f.filename}': {e}")
+                traceback.print_exc()
+                errors.append(f"{f.filename}: {str(e)}")
 
-    if errors and not uploaded:
-        raise HTTPException(status_code=500, detail=f"All uploads failed: {'; '.join(errors)}")
+        if errors and not uploaded:
+            raise HTTPException(status_code=500, detail=f"All uploads failed: {'; '.join(errors)}")
 
-    message = f"Successfully uploaded {len(uploaded)} file(s): {', '.join(uploaded)}"
-    if errors:
-        message += f". Failed: {'; '.join(errors)}"
+        message = f"Successfully uploaded {len(uploaded)} file(s): {', '.join(uploaded)}"
+        if errors:
+            message += f". Failed: {'; '.join(errors)}"
 
-    return {"message": message}
+        return {"message": message}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error in upload_course_materials: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 # ==================== Admin Endpoints ====================
