@@ -517,15 +517,15 @@ async def assist(query_body: AssistRequest, request: Request):
             existing = await config.instructor_session_service.get_session(
                 app_name=config.runner_instructor.app_name,
                 user_id=user_gmail,
-                session_id=notebook_id,
+                session_id=f"{course_handle}_{notebook_id}",
             )
 
             if not existing:
                 await config.instructor_session_service.create_session(
                     app_name=config.runner_instructor.app_name,
                     user_id=user_gmail,
-                    session_id=notebook_id,
-                    course_handle=course_handle
+                    session_id=f"{course_handle}_{notebook_id}",
+                    state=initial_state
                 )
             # the insrtuctor is asking the agent - so we should provide the full context, question, 
             # instructor's answer and output to get better suggestions from the agent for grading and 
@@ -559,14 +559,14 @@ async def assist(query_body: AssistRequest, request: Request):
             existing = await config.student_session_service.get_session(
                 app_name=config.runner_student.app_name,
                 user_id=user_gmail,
-                session_id=notebook_id,
+                session_id=f"{course_handle}_{notebook_id}",
             )
 
             if not existing:
                 await config.student_session_service.create_session(
                     app_name=config.runner_student.app_name,
                     user_id=user_gmail,
-                    session_id=notebook_id,
+                    session_id=f"{course_handle}_{notebook_id}",
                     state=initial_state
                 )
             #get the context and question from rubric (stored in the cache)
@@ -597,7 +597,7 @@ async def assist(query_body: AssistRequest, request: Request):
         )
 
         # Attempt to get the response using the current session ID
-        response_text = await run_agent_and_get_response(notebook_id, user_gmail, content, runner)
+        response_text = await run_agent_and_get_response(f"{course_handle}_{notebook_id}", user_gmail, content, runner)
 
         if not response_text:
             raise HTTPException(status_code=500, detail="Failed to generate response")
