@@ -59,7 +59,8 @@ from models import (
     TutorInteractionRequest, TutorInteractionResponse,
     CreateCourseRequest, CreateCourseResponse,
     FetchMarksListRequest, FetchMarksListResponse,
-    AddRubricRequest, AddRubricResponse
+    AddRubricRequest, AddRubricResponse,
+    BuildCourseIndexRequest, BuildCourseIndexResponse
 )
 from auth import (
     create_jwt_token,
@@ -1469,34 +1470,16 @@ async def get_upload_url(request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}")
 
 
-@app.post("/build_course_index")
-async def build_course_index_api(request: Request):
+@app.post("/build_course_index", response_model=BuildCourseIndexResponse)
+async def build_course_index_api(query_body: BuildCourseIndexRequest, request: Request):
     '''
     Build the RAG vector index for a course by processing all PDFs in its
     GCS folder. Only accessible to course instructors or platform admins.
-
-    Request JSON body:
-        {
-            "course_id": "...",
-            "term_id": "...",
-            "institution_id": "..."
-        }
-
-    Returns:
-        {"status": "success", "files_processed": N, "chunks_created": M}
     '''
     try:
         user = get_current_user(request)
-        body = await request.json()
 
-        course_id = body.get('course_id', '')
-        term_id = body.get('term_id', '')
-        institution_id = body.get('institution_id', '')
-
-        if not all([course_id, term_id, institution_id]):
-            raise HTTPException(status_code=400, detail="Missing required fields")
-
-        course_handle = make_course_handle(institution_id, term_id, course_id)
+        course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
         user_gmail = user.get('email', '').lower()
         if not is_authorized(user_gmail, course_handle):

@@ -147,3 +147,14 @@ class AddRubricRequest(BaseModel):
 class AddRubricResponse(BaseModel):
     response: str
 
+class BuildCourseIndexRequest(BaseModel):
+    course_id: str
+    term_id: str
+    institution_id: str
+
+class BuildCourseIndexResponse(BaseModel):
+    status: str
+    files_processed: int
+    chunks_created: int
+    message: str | None = None
+

@@ -195,7 +195,7 @@ class TestBuildCourseIndexEndpoint:
             json={"course_id": "6.001"},
             headers=_auth_header(email="instructor@test.com"),
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422  # Pydantic validation error
 
 
 # ---------------------------------------------------------------------------
