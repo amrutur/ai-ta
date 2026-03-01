@@ -279,3 +279,172 @@ class TestUploadRubricEndpoint:
 
         # Clean up
         del courses[course_handle]
+
+
+# ---------------------------------------------------------------------------
+# /upload_course_materials endpoints
+# ---------------------------------------------------------------------------
+
+class TestUploadCourseMaterialsEndpoint:
+
+    def _setup_course(self, instructor_email="instructor@test.com"):
+        """Create a course in the cache and return the course handle."""
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+        courses[course_handle] = {
+            "instructor_gmail": instructor_email,
+            "course_name": "Intro to CS",
+            "folder_name": "test-bucket/mit-2025-6-001/",
+        }
+        return course_handle
+
+    def _cleanup_course(self, course_handle):
+        from api_server import courses
+        if course_handle in courses:
+            del courses[course_handle]
+
+    # --- GET (HTML page) ---
+
+    def test_get_requires_auth(self, client):
+        """GET /upload_course_materials without auth should return 401."""
+        resp = client.get(
+            "/upload_course_materials",
+            params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+        )
+        assert resp.status_code == 401
+
+    def test_get_rejects_non_instructor(self, client):
+        """GET /upload_course_materials by a non-instructor should return 403."""
+        course_handle = self._setup_course(instructor_email="real-instructor@test.com")
+        try:
+            resp = client.get(
+                "/upload_course_materials",
+                params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 403
+        finally:
+            self._cleanup_course(course_handle)
+
+    def test_get_returns_html_for_instructor(self, client):
+        """Instructor should get the drag-and-drop upload page."""
+        course_handle = self._setup_course()
+        try:
+            resp = client.get(
+                "/upload_course_materials",
+                params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+                headers=_auth_header(email="instructor@test.com"),
+            )
+            assert resp.status_code == 200
+            assert "text/html" in resp.headers["content-type"]
+            assert "Drag" in resp.text
+            assert "Intro to CS" in resp.text
+        finally:
+            self._cleanup_course(course_handle)
+
+    def test_get_returns_html_for_admin(self, client):
+        """Platform admin should also be able to access the upload page."""
+        course_handle = self._setup_course()
+        try:
+            resp = client.get(
+                "/upload_course_materials",
+                params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+                headers=_admin_header(),
+            )
+            assert resp.status_code == 200
+            assert "text/html" in resp.headers["content-type"]
+        finally:
+            self._cleanup_course(course_handle)
+
+    # --- POST (file upload) ---
+
+    def test_post_requires_auth(self, client):
+        """POST /upload_course_materials without auth should return 401."""
+        resp = client.post(
+            "/upload_course_materials",
+            data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+            files=[("files", ("test.txt", b"hello", "text/plain"))],
+        )
+        assert resp.status_code == 401
+
+    def test_post_rejects_non_instructor(self, client):
+        """Non-instructor should get 403 on POST."""
+        course_handle = self._setup_course(instructor_email="real-instructor@test.com")
+        try:
+            resp = client.post(
+                "/upload_course_materials",
+                data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+                files=[("files", ("test.txt", b"hello", "text/plain"))],
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 403
+        finally:
+            self._cleanup_course(course_handle)
+
+    def test_post_uploads_file_to_gcs(self, client):
+        """Instructor should be able to upload files; upload_blob is called."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.upload_blob") as mock_upload:
+                mock_upload.return_value = "gs://test-bucket/mit-2025-6-001/notes.pdf"
+                resp = client.post(
+                    "/upload_course_materials",
+                    data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+                    files=[("files", ("notes.pdf", b"pdf-content", "application/pdf"))],
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "notes.pdf" in data["message"]
+            mock_upload.assert_called_once_with(
+                "test-bucket",
+                "mit-2025-6-001/notes.pdf",
+                b"pdf-content",
+                content_type="application/pdf",
+            )
+        finally:
+            self._cleanup_course(course_handle)
+
+    def test_post_uploads_multiple_files(self, client):
+        """Multiple files should each result in a separate upload_blob call."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.upload_blob") as mock_upload:
+                mock_upload.return_value = "gs://test-bucket/mit-2025-6-001/file"
+                resp = client.post(
+                    "/upload_course_materials",
+                    data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+                    files=[
+                        ("files", ("a.txt", b"aaa", "text/plain")),
+                        ("files", ("b.txt", b"bbb", "text/plain")),
+                    ],
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+
+            assert resp.status_code == 200
+            assert mock_upload.call_count == 2
+            data = resp.json()
+            assert "a.txt" in data["message"]
+            assert "b.txt" in data["message"]
+        finally:
+            self._cleanup_course(course_handle)
+
+    def test_post_handles_upload_failure(self, client):
+        """If upload_blob raises, the error is reported but doesn't crash."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.upload_blob", side_effect=Exception("GCS error")):
+                resp = client.post(
+                    "/upload_course_materials",
+                    data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+                    files=[("files", ("bad.txt", b"data", "text/plain"))],
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+
+            assert resp.status_code == 500
+            assert "failed" in resp.json()["detail"].lower()
+        finally:
+            self._cleanup_course(course_handle)
