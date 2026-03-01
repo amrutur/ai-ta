@@ -800,11 +800,20 @@ def is_authorized(user_gmail: str, course_handle: str) -> bool:
     """Check if the user is an instructor for the course or a platform admin."""
     if not user_gmail:
         return False
-    instructor_gmail = courses.get(course_handle, {}).get('instructor_gmail', '').lower()
-    if user_gmail.lower() not in [instructor_gmail, config.admin_email]:
-        #logging.warning(f"Unauthorized access attempt by {user_gmail} for course {course_handle}. Instructor: {instructor_gmail}, Admin: {config.admin_email}")
-        return False
-    return True
+    user_lower = user_gmail.lower()
+
+    # Platform admin is always authorized
+    if user_lower == config.admin_email:
+        return True
+
+    # Check all instructor-related email fields on the course
+    course_data = courses.get(course_handle, {})
+    for field in ('instructor_gmail', 'instructor_email', 'created_by'):
+        value = course_data.get(field)
+        if value and user_lower == value.lower():
+            return True
+
+    return False
 
 @app.post("/disable_tutor")
 async def disable_tutor(
