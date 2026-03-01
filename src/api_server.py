@@ -85,7 +85,7 @@ from database import (
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from email_service import send_email
-from storage_utils import upload_blob
+from storage_utils import upload_blob, generate_signed_upload_url
 import datetime
 from collections import defaultdict
 
@@ -1311,22 +1311,36 @@ async def upload_course_materials_page(request: Request):
                     status.textContent = 'Uploading file ' + (i + 1) + ' of ' + total + ': ' + f.name + '...';
                     status.style.display = 'block';
 
-                    const formData = new FormData();
-                    formData.append('course_id', courseId);
-                    formData.append('term_id', termId);
-                    formData.append('institution_id', institutionId);
-                    formData.append('files', f);
-
                     try {{
-                        const resp = await fetch('/upload_course_materials', {{
+                        // Step 1: Get a signed upload URL from our server
+                        const urlResp = await fetch('/get_upload_url', {{
                             method: 'POST',
-                            body: formData,
+                            headers: {{'Content-Type': 'application/json'}},
+                            body: JSON.stringify({{
+                                course_id: courseId,
+                                term_id: termId,
+                                institution_id: institutionId,
+                                filename: f.name,
+                                content_type: f.type || 'application/octet-stream'
+                            }}),
                             credentials: 'same-origin'
                         }});
-                        if (!resp.ok) {{
-                            let detail = 'HTTP ' + resp.status;
-                            try {{ const d = await resp.json(); detail = d.detail || detail; }} catch(e) {{}}
+                        if (!urlResp.ok) {{
+                            let detail = 'HTTP ' + urlResp.status;
+                            try {{ const d = await urlResp.json(); detail = d.detail || detail; }} catch(e) {{}}
                             errors.push(f.name + ': ' + detail);
+                            continue;
+                        }}
+                        const {{ upload_url }} = await urlResp.json();
+
+                        // Step 2: PUT the file directly to GCS using the signed URL
+                        const putResp = await fetch(upload_url, {{
+                            method: 'PUT',
+                            headers: {{'Content-Type': f.type || 'application/octet-stream'}},
+                            body: f
+                        }});
+                        if (!putResp.ok) {{
+                            errors.push(f.name + ': GCS upload failed (HTTP ' + putResp.status + ')');
                         }} else {{
                             uploaded++;
                         }}
@@ -1381,20 +1395,37 @@ async def validate_course_access(
     return {"course_name": course_name, "course_handle": course_handle}
 
 
-@app.post("/upload_course_materials")
-async def upload_course_materials(
-    request: Request,
-    course_id: str = Form(...),
-    term_id: str = Form(...),
-    institution_id: str = Form(...),
-    files: list[UploadFile] = File(...)
-):
+@app.post("/get_upload_url")
+async def get_upload_url(request: Request):
     '''
-    Upload course material files to the GCS bucket for the given course.
-    Only accessible to course instructors or platform administrators.
+    Generate a signed GCS upload URL so the browser can PUT a file
+    directly to Cloud Storage, bypassing the Cloud Run 32 MB body limit.
+
+    Request JSON body:
+        {
+            "course_id": "...",
+            "term_id": "...",
+            "institution_id": "...",
+            "filename": "notes.pdf",
+            "content_type": "application/pdf"
+        }
+
+    Returns:
+        {"upload_url": "<signed URL>", "destination": "<object path>"}
     '''
     try:
         user = get_current_user(request)
+        body = await request.json()
+
+        course_id = body.get('course_id', '')
+        term_id = body.get('term_id', '')
+        institution_id = body.get('institution_id', '')
+        filename = body.get('filename', '')
+        content_type = body.get('content_type', 'application/octet-stream')
+
+        if not all([course_id, term_id, institution_id, filename]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+
         course_handle = make_course_handle(institution_id, term_id, course_id)
 
         user_gmail = user.get('email', '').lower()
@@ -1408,40 +1439,21 @@ async def upload_course_materials(
         if not folder_name:
             raise HTTPException(status_code=500, detail="Course folder not configured")
 
-        # folder_name is "bucket_name/course_handle/" — split out the bucket and prefix
         parts = folder_name.split('/', 1)
         bucket_name = parts[0]
         prefix = parts[1] if len(parts) > 1 else ''
+        destination = f"{prefix}{filename}"
 
-        uploaded = []
-        errors = []
+        signed_url = generate_signed_upload_url(bucket_name, destination, content_type)
+        logging.info(f"Instructor {user_gmail} requested upload URL for '{filename}' in course {course_handle}")
 
-        for f in files:
-            try:
-                file_data = await f.read()
-                destination = f"{prefix}{f.filename}"
-                upload_blob(bucket_name, destination, file_data, content_type=f.content_type)
-                uploaded.append(f.filename)
-                logging.info(f"Instructor {user_gmail} uploaded '{f.filename}' to course {course_handle}")
-            except Exception as e:
-                logging.error(f"Failed to upload '{f.filename}': {e}")
-                traceback.print_exc()
-                errors.append(f"{f.filename}: {str(e)}")
-
-        if errors and not uploaded:
-            raise HTTPException(status_code=500, detail=f"All uploads failed: {'; '.join(errors)}")
-
-        message = f"Successfully uploaded {len(uploaded)} file(s): {', '.join(uploaded)}"
-        if errors:
-            message += f". Failed: {'; '.join(errors)}"
-
-        return {"message": message}
+        return {"upload_url": signed_url, "destination": destination}
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"Unexpected error in upload_course_materials: {e}")
+        logging.error(f"Unexpected error in get_upload_url: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}")
 
 
 # ==================== Admin Endpoints ====================

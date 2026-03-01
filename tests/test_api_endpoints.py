@@ -371,89 +371,65 @@ class TestUploadCourseMaterialsEndpoint:
         finally:
             self._cleanup_course(course_handle)
 
-    # --- POST (file upload) ---
+    # --- POST /get_upload_url (signed URL generation) ---
 
-    def test_post_requires_auth(self, client):
-        """POST /upload_course_materials without auth should return 401."""
+    def test_get_upload_url_requires_auth(self, client):
+        """POST /get_upload_url without auth should return 401."""
         resp = client.post(
-            "/upload_course_materials",
-            data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
-            files=[("files", ("test.txt", b"hello", "text/plain"))],
+            "/get_upload_url",
+            json={"course_id": "6.001", "term_id": "2025", "institution_id": "mit",
+                  "filename": "test.txt", "content_type": "text/plain"},
         )
         assert resp.status_code == 401
 
-    def test_post_rejects_non_instructor(self, client):
-        """Non-instructor should get 403 on POST."""
+    def test_get_upload_url_rejects_non_instructor(self, client):
+        """Non-instructor should get 403 on /get_upload_url."""
         course_handle = self._setup_course(instructor_email="real-instructor@test.com")
         try:
             resp = client.post(
-                "/upload_course_materials",
-                data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
-                files=[("files", ("test.txt", b"hello", "text/plain"))],
+                "/get_upload_url",
+                json={"course_id": "6.001", "term_id": "2025", "institution_id": "mit",
+                      "filename": "test.txt", "content_type": "text/plain"},
                 headers=_auth_header(email="student@test.com"),
             )
             assert resp.status_code == 403
         finally:
             self._cleanup_course(course_handle)
 
-    def test_post_uploads_file_to_gcs(self, client):
-        """Instructor should be able to upload files; upload_blob is called."""
+    def test_get_upload_url_returns_signed_url(self, client):
+        """Instructor should receive a signed upload URL and destination path."""
         course_handle = self._setup_course()
         try:
-            with patch("api_server.upload_blob") as mock_upload:
-                mock_upload.return_value = "gs://test-bucket/mit-2025-6-001/notes.pdf"
+            with patch("api_server.generate_signed_upload_url") as mock_gen:
+                mock_gen.return_value = "https://storage.googleapis.com/signed-url-here"
                 resp = client.post(
-                    "/upload_course_materials",
-                    data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
-                    files=[("files", ("notes.pdf", b"pdf-content", "application/pdf"))],
+                    "/get_upload_url",
+                    json={"course_id": "6.001", "term_id": "2025", "institution_id": "mit",
+                          "filename": "notes.pdf", "content_type": "application/pdf"},
                     headers=_auth_header(email="instructor@test.com"),
                 )
 
             assert resp.status_code == 200
             data = resp.json()
-            assert "notes.pdf" in data["message"]
-            mock_upload.assert_called_once_with(
+            assert data["upload_url"] == "https://storage.googleapis.com/signed-url-here"
+            assert data["destination"] == "mit-2025-6-001/notes.pdf"
+            mock_gen.assert_called_once_with(
                 "test-bucket",
                 "mit-2025-6-001/notes.pdf",
-                b"pdf-content",
-                content_type="application/pdf",
+                "application/pdf",
             )
         finally:
             self._cleanup_course(course_handle)
 
-    def test_post_uploads_multiple_files(self, client):
-        """Multiple files should each result in a separate upload_blob call."""
+    def test_get_upload_url_handles_generation_failure(self, client):
+        """If generate_signed_upload_url raises, the error is reported."""
         course_handle = self._setup_course()
         try:
-            with patch("api_server.upload_blob") as mock_upload:
-                mock_upload.return_value = "gs://test-bucket/mit-2025-6-001/file"
+            with patch("api_server.generate_signed_upload_url", side_effect=Exception("GCS error")):
                 resp = client.post(
-                    "/upload_course_materials",
-                    data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
-                    files=[
-                        ("files", ("a.txt", b"aaa", "text/plain")),
-                        ("files", ("b.txt", b"bbb", "text/plain")),
-                    ],
-                    headers=_auth_header(email="instructor@test.com"),
-                )
-
-            assert resp.status_code == 200
-            assert mock_upload.call_count == 2
-            data = resp.json()
-            assert "a.txt" in data["message"]
-            assert "b.txt" in data["message"]
-        finally:
-            self._cleanup_course(course_handle)
-
-    def test_post_handles_upload_failure(self, client):
-        """If upload_blob raises, the error is reported but doesn't crash."""
-        course_handle = self._setup_course()
-        try:
-            with patch("api_server.upload_blob", side_effect=Exception("GCS error")):
-                resp = client.post(
-                    "/upload_course_materials",
-                    data={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
-                    files=[("files", ("bad.txt", b"data", "text/plain"))],
+                    "/get_upload_url",
+                    json={"course_id": "6.001", "term_id": "2025", "institution_id": "mit",
+                          "filename": "bad.txt", "content_type": "text/plain"},
                     headers=_auth_header(email="instructor@test.com"),
                 )
 
