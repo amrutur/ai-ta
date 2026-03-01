@@ -307,20 +307,34 @@ class TestUploadCourseMaterialsEndpoint:
 
     # --- GET (HTML page) ---
 
-    def test_get_requires_auth(self, client):
-        """GET /upload_course_materials without auth should return 401."""
+    def test_get_redirects_to_login_when_unauthenticated(self, client):
+        """GET /upload_course_materials without auth should redirect to /login."""
+        resp = client.get("/upload_course_materials", follow_redirects=False)
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["location"]
+        assert "message=" in resp.headers["location"]
+
+    def test_get_returns_html_with_form_fields(self, client):
+        """Authenticated user should see the page with text boxes for IDs."""
         resp = client.get(
             "/upload_course_materials",
-            params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
+            headers=_auth_header(email="instructor@test.com"),
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "institution_id" in resp.text
+        assert "term_id" in resp.text
+        assert "course_id" in resp.text
+        assert "instructor@test.com" in resp.text
 
-    def test_get_rejects_non_instructor(self, client):
-        """GET /upload_course_materials by a non-instructor should return 403."""
+    # --- GET /validate_course_access ---
+
+    def test_validate_rejects_non_instructor(self, client):
+        """Non-instructor should get 403 from /validate_course_access."""
         course_handle = self._setup_course(instructor_email="real-instructor@test.com")
         try:
             resp = client.get(
-                "/upload_course_materials",
+                "/validate_course_access",
                 params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
                 headers=_auth_header(email="student@test.com"),
             )
@@ -328,33 +342,32 @@ class TestUploadCourseMaterialsEndpoint:
         finally:
             self._cleanup_course(course_handle)
 
-    def test_get_returns_html_for_instructor(self, client):
-        """Instructor should get the drag-and-drop upload page."""
+    def test_validate_returns_course_name_for_instructor(self, client):
+        """Instructor should get course info from /validate_course_access."""
         course_handle = self._setup_course()
         try:
             resp = client.get(
-                "/upload_course_materials",
+                "/validate_course_access",
                 params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
                 headers=_auth_header(email="instructor@test.com"),
             )
             assert resp.status_code == 200
-            assert "text/html" in resp.headers["content-type"]
-            assert "Drag" in resp.text
-            assert "Intro to CS" in resp.text
+            data = resp.json()
+            assert data["course_name"] == "Intro to CS"
         finally:
             self._cleanup_course(course_handle)
 
-    def test_get_returns_html_for_admin(self, client):
-        """Platform admin should also be able to access the upload page."""
+    def test_validate_returns_course_name_for_admin(self, client):
+        """Platform admin should also pass /validate_course_access."""
         course_handle = self._setup_course()
         try:
             resp = client.get(
-                "/upload_course_materials",
+                "/validate_course_access",
                 params={"course_id": "6.001", "term_id": "2025", "institution_id": "mit"},
                 headers=_admin_header(),
             )
             assert resp.status_code == 200
-            assert "text/html" in resp.headers["content-type"]
+            assert resp.json()["course_name"] == "Intro to CS"
         finally:
             self._cleanup_course(course_handle)
 

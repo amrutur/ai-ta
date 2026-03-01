@@ -1080,27 +1080,19 @@ async def upload_rubric_api(
 # ==================== Course Materials Upload ====================
 
 @app.get("/upload_course_materials", response_class=HTMLResponse)
-async def upload_course_materials_page(
-    course_id: str,
-    term_id: str,
-    institution_id: str,
-    request: Request
-):
+async def upload_course_materials_page(request: Request):
     '''
     Serve a drag-and-drop file upload page for course materials.
-    Only accessible to course instructors or platform administrators.
+    Redirects to /login if the user is not authenticated.
+    The page includes text boxes for institution_id, term_id, course_id
+    and validates authorization before showing the upload area.
     '''
-    user = get_current_user(request)
-    course_handle = make_course_handle(institution_id, term_id, course_id)
-
-    user_gmail = user.get('email', '').lower()
-    if not is_authorized(user_gmail, course_handle):
-        raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
-
-    if course_handle not in courses:
-        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
-
-    course_name = courses[course_handle].get('course_name', course_id)
+    # Check authentication — redirect to login instead of 401 for browser users
+    try:
+        user = get_current_user(request)
+        user_email = user.get('email', '')
+    except HTTPException:
+        return RedirectResponse(url="/login?message=Please+login+first+to+upload+course+materials", status_code=302)
 
     html_content = f"""
     <!DOCTYPE html>
@@ -1108,15 +1100,29 @@ async def upload_course_materials_page(
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Upload Course Materials - {course_name}</title>
+        <title>Upload Course Materials</title>
         <style>
             body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }}
             h1 {{ color: #333; }}
-            .info {{ background: #e8f4fd; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; color: #1a5276; }}
+            .user-info {{ background: #e8f4fd; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; color: #1a5276; }}
+            .form-group {{ margin-bottom: 16px; }}
+            .form-group label {{ display: block; font-weight: bold; margin-bottom: 6px; color: #333; }}
+            .form-group input {{
+                width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 6px;
+                font-size: 15px; box-sizing: border-box;
+            }}
+            .form-group input:focus {{ border-color: #2196F3; outline: none; box-shadow: 0 0 0 2px rgba(33,150,243,0.2); }}
+            #load-course-btn {{
+                padding: 12px 32px; background: #2196F3; color: #fff;
+                border: none; border-radius: 6px; font-size: 16px; cursor: pointer;
+            }}
+            #load-course-btn:hover {{ background: #1976D2; }}
+            #load-course-btn:disabled {{ background: #aaa; cursor: not-allowed; }}
+            .course-info {{ background: #e8f4fd; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; color: #1a5276; display: none; }}
             .drop-zone {{
                 border: 3px dashed #aaa; border-radius: 12px; padding: 60px 20px;
                 text-align: center; background: #fff; cursor: pointer;
-                transition: border-color 0.3s, background 0.3s;
+                transition: border-color 0.3s, background 0.3s; display: none;
             }}
             .drop-zone.dragover {{ border-color: #2196F3; background: #e3f2fd; }}
             .drop-zone p {{ font-size: 18px; color: #666; margin: 0 0 10px; }}
@@ -1132,24 +1138,40 @@ async def upload_course_materials_page(
             .file-item .size {{ color: #888; font-size: 13px; }}
             .file-item .remove {{ color: #e74c3c; cursor: pointer; font-weight: bold; border: none; background: none; font-size: 18px; }}
             #upload-btn {{
-                margin-top: 20px; padding: 12px 32px; background: #2196F3; color: #fff;
+                margin-top: 20px; padding: 12px 32px; background: #4CAF50; color: #fff;
                 border: none; border-radius: 6px; font-size: 16px; cursor: pointer;
                 display: none;
             }}
-            #upload-btn:hover {{ background: #1976D2; }}
+            #upload-btn:hover {{ background: #388E3C; }}
             #upload-btn:disabled {{ background: #aaa; cursor: not-allowed; }}
             #status {{ margin-top: 16px; padding: 12px 16px; border-radius: 6px; display: none; }}
             #status.success {{ display: block; background: #d4edda; color: #155724; }}
             #status.error {{ display: block; background: #f8d7da; color: #721c24; }}
             #status.progress {{ display: block; background: #fff3cd; color: #856404; }}
+            #course-form {{ background: #fff; padding: 24px; border-radius: 8px; border: 1px solid #ddd; margin-bottom: 24px; }}
         </style>
     </head>
     <body>
         <h1>Upload Course Materials</h1>
-        <div class="info">
-            <strong>Course:</strong> {course_name} ({course_id})<br>
-            <strong>Term:</strong> {term_id} &nbsp; <strong>Institution:</strong> {institution_id}
+        <div class="user-info">Logged in as: <strong>{user_email}</strong></div>
+
+        <div id="course-form">
+            <div class="form-group">
+                <label for="institution_id">Institution ID</label>
+                <input type="text" id="institution_id" placeholder="e.g. iisc">
+            </div>
+            <div class="form-group">
+                <label for="term_id">Term ID</label>
+                <input type="text" id="term_id" placeholder="e.g. 2025">
+            </div>
+            <div class="form-group">
+                <label for="course_id">Course ID</label>
+                <input type="text" id="course_id" placeholder="e.g. E0-228">
+            </div>
+            <button id="load-course-btn">Load Course</button>
         </div>
+
+        <div class="course-info" id="course-info"></div>
 
         <div class="drop-zone" id="drop-zone">
             <p>Drag &amp; drop files here</p>
@@ -1162,12 +1184,60 @@ async def upload_course_materials_page(
         <div id="status"></div>
 
         <script>
+            const loadBtn = document.getElementById('load-course-btn');
+            const courseInfo = document.getElementById('course-info');
+            const courseForm = document.getElementById('course-form');
             const dropZone = document.getElementById('drop-zone');
             const fileInput = document.getElementById('file-input');
             const fileList = document.getElementById('file-list');
             const uploadBtn = document.getElementById('upload-btn');
             const status = document.getElementById('status');
             let selectedFiles = [];
+            let courseId = '', termId = '', institutionId = '';
+
+            loadBtn.addEventListener('click', async () => {{
+                institutionId = document.getElementById('institution_id').value.trim();
+                termId = document.getElementById('term_id').value.trim();
+                courseId = document.getElementById('course_id').value.trim();
+
+                if (!institutionId || !termId || !courseId) {{
+                    status.className = 'error';
+                    status.textContent = 'Please fill in all three fields.';
+                    status.style.display = 'block';
+                    return;
+                }}
+
+                status.className = 'progress';
+                status.textContent = 'Validating course access...';
+                status.style.display = 'block';
+                loadBtn.disabled = true;
+
+                try {{
+                    const resp = await fetch(
+                        '/validate_course_access?institution_id=' + encodeURIComponent(institutionId)
+                        + '&term_id=' + encodeURIComponent(termId)
+                        + '&course_id=' + encodeURIComponent(courseId),
+                        {{ credentials: 'same-origin' }}
+                    );
+                    const data = await resp.json();
+                    if (resp.ok) {{
+                        courseInfo.innerHTML = '<strong>Course:</strong> ' + data.course_name
+                            + ' (' + courseId + ')<br><strong>Term:</strong> ' + termId
+                            + ' &nbsp; <strong>Institution:</strong> ' + institutionId;
+                        courseInfo.style.display = 'block';
+                        dropZone.style.display = 'block';
+                        courseForm.style.display = 'none';
+                        status.style.display = 'none';
+                    }} else {{
+                        status.className = 'error';
+                        status.textContent = data.detail || 'Access denied.';
+                    }}
+                }} catch (err) {{
+                    status.className = 'error';
+                    status.textContent = 'Network error: ' + err.message;
+                }}
+                loadBtn.disabled = false;
+            }});
 
             dropZone.addEventListener('click', () => fileInput.click());
 
@@ -1234,9 +1304,9 @@ async def upload_course_materials_page(
                 status.style.display = 'block';
 
                 const formData = new FormData();
-                formData.append('course_id', '{course_id}');
-                formData.append('term_id', '{term_id}');
-                formData.append('institution_id', '{institution_id}');
+                formData.append('course_id', courseId);
+                formData.append('term_id', termId);
+                formData.append('institution_id', institutionId);
                 for (const f of selectedFiles) {{
                     formData.append('files', f);
                 }}
@@ -1268,6 +1338,31 @@ async def upload_course_materials_page(
     </html>
     """
     return HTMLResponse(content=html_content, status_code=200)
+
+
+@app.get("/validate_course_access")
+async def validate_course_access(
+    institution_id: str,
+    term_id: str,
+    course_id: str,
+    request: Request
+):
+    '''
+    Validate that the authenticated user has instructor/admin access to the course.
+    Called by the upload page JS before showing the drag-and-drop area.
+    '''
+    user = get_current_user(request)
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    user_gmail = user.get('email', '').lower()
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="You are not an instructor for this course nor a platform admin")
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
+
+    course_name = courses[course_handle].get('course_name', course_id)
+    return {"course_name": course_name, "course_handle": course_handle}
 
 
 @app.post("/upload_course_materials")
