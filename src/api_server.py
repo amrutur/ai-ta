@@ -181,8 +181,9 @@ async def login(request: Request):
         include_granted_scopes='true'
     )
 
-    # Store the state in the user's session to verify it in the callback, preventing CSRF.
+    # Store the state and PKCE code_verifier in the session for the callback.
     request.session['state'] = state
+    request.session['code_verifier'] = flow.code_verifier
     logging.info(f"Login: Generated and stored state in session: {state[:10]}...")
     logging.info(f"Login: Using redirect URI: {config.client_config['web']['redirect_uris'][config.REDIRECT_URI_INDEX]}")
     logging.debug(f"Login: Session data after storing state: {dict(request.session)}")
@@ -262,8 +263,10 @@ async def oauth_callback(request: Request):
 
     logging.info(f"Callback: Using authorization_response: {authorization_response[:100]}...")
 
+    # Restore the PKCE code_verifier so oauthlib can complete the exchange
+    code_verifier = request.session.get('code_verifier')
     try:
-        flow.fetch_token(authorization_response=authorization_response)
+        flow.fetch_token(authorization_response=authorization_response, code_verifier=code_verifier)
     except Exception as e:
         logging.error(f"OAuth token exchange failed: {e}")
         traceback.print_exc()
