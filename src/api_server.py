@@ -1301,39 +1301,51 @@ async def upload_course_materials_page(request: Request):
             uploadBtn.addEventListener('click', async () => {{
                 if (selectedFiles.length === 0) return;
                 uploadBtn.disabled = true;
-                status.className = 'progress';
-                status.textContent = 'Uploading ' + selectedFiles.length + ' file(s)...';
-                status.style.display = 'block';
+                const total = selectedFiles.length;
+                let uploaded = 0;
+                const errors = [];
 
-                const formData = new FormData();
-                formData.append('course_id', courseId);
-                formData.append('term_id', termId);
-                formData.append('institution_id', institutionId);
-                for (const f of selectedFiles) {{
+                for (let i = 0; i < total; i++) {{
+                    const f = selectedFiles[i];
+                    status.className = 'progress';
+                    status.textContent = 'Uploading file ' + (i + 1) + ' of ' + total + ': ' + f.name + '...';
+                    status.style.display = 'block';
+
+                    const formData = new FormData();
+                    formData.append('course_id', courseId);
+                    formData.append('term_id', termId);
+                    formData.append('institution_id', institutionId);
                     formData.append('files', f);
+
+                    try {{
+                        const resp = await fetch('/upload_course_materials', {{
+                            method: 'POST',
+                            body: formData,
+                            credentials: 'same-origin'
+                        }});
+                        if (!resp.ok) {{
+                            let detail = 'HTTP ' + resp.status;
+                            try {{ const d = await resp.json(); detail = d.detail || detail; }} catch(e) {{}}
+                            errors.push(f.name + ': ' + detail);
+                        }} else {{
+                            uploaded++;
+                        }}
+                    }} catch (err) {{
+                        errors.push(f.name + ': ' + err.message);
+                    }}
                 }}
 
-                try {{
-                    const resp = await fetch('/upload_course_materials', {{
-                        method: 'POST',
-                        body: formData,
-                        credentials: 'same-origin'
-                    }});
-                    if (!resp.ok) {{
-                        let detail = 'Server error (HTTP ' + resp.status + ')';
-                        try {{ const d = await resp.json(); detail = d.detail || detail; }} catch(e) {{}}
-                        status.className = 'error';
-                        status.textContent = detail;
-                    }} else {{
-                        const data = await resp.json();
-                        status.className = 'success';
-                        status.textContent = data.message || 'Upload successful!';
-                        selectedFiles = [];
-                        renderFileList();
-                    }}
-                }} catch (err) {{
+                if (errors.length === 0) {{
+                    status.className = 'success';
+                    status.textContent = 'Successfully uploaded ' + uploaded + ' file(s).';
+                    selectedFiles = [];
+                    renderFileList();
+                }} else if (uploaded > 0) {{
                     status.className = 'error';
-                    status.textContent = 'Network error: ' + err.message;
+                    status.textContent = 'Uploaded ' + uploaded + ' of ' + total + '. Failed: ' + errors.join('; ');
+                }} else {{
+                    status.className = 'error';
+                    status.textContent = 'All uploads failed: ' + errors.join('; ');
                 }}
                 uploadBtn.disabled = false;
             }});
