@@ -77,17 +77,15 @@ _mock_config.student_session_service = AsyncMock()
 sys.modules["config"] = _mock_config
 
 # ---------------------------------------------------------------------------
-# 2b. Patch missing ADK classes.
-#     The deployed environment may have a newer google-adk that includes
-#     FirestoreSessionService.  If the local version doesn't export it,
-#     inject a mock so that ``from google.adk.sessions import
-#     FirestoreSessionService`` succeeds at import time.
+# 2b. Inject mock ``firestore_service`` module.
+#     The real module imports google.cloud.firestore_v1.AsyncClient and
+#     google.adk.sessions internals.  For tests we only need the class name
+#     so that ``from firestore_service import FirestoreSessionService``
+#     resolves.  We use a simple mock class.
 # ---------------------------------------------------------------------------
-try:
-    from google.adk.sessions import FirestoreSessionService  # noqa: F401
-except ImportError:
-    import google.adk.sessions as _adk_sessions
-    _adk_sessions.FirestoreSessionService = MagicMock  # type: ignore[attr-defined]
+_mock_firestore_service = MagicMock()
+_mock_firestore_service.FirestoreSessionService = MagicMock
+sys.modules["firestore_service"] = _mock_firestore_service
 
 
 # ---------------------------------------------------------------------------

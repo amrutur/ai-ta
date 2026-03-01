@@ -15,7 +15,7 @@ import asyncio
 
 from fastapi import HTTPException
 from google.adk import Runner
-from google.adk.sessions import FirestoreSessionService
+from firestore_service import FirestoreSessionService
 from google.genai import types
 
 async def run_agent_and_get_response(current_session_id: str, user_id: str, content: types.Content, runner: Runner) -> str:
