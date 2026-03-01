@@ -499,7 +499,6 @@ async def assist(query_body: AssistRequest, request: Request):
     }
 
     is_instructor = is_authorized(user_gmail, course_handle)
-    logging.info(f"/assist: user={user_gmail}, course={course_handle}, is_instructor={is_instructor}")
 
     # Check if tutor is disabled by instructor
     if not is_instructor and not courses[course_handle].get('isactive_tutor', False):
@@ -800,7 +799,6 @@ async def session_test(request: Request):
 def is_authorized(user_gmail: str, course_handle: str) -> bool:
     """Check if the user is an instructor for the course or a platform admin."""
     if not user_gmail:
-        logging.debug(f"is_authorized: no user email provided")
         return False
     user_lower = user_gmail.lower()
 
@@ -815,10 +813,6 @@ def is_authorized(user_gmail: str, course_handle: str) -> bool:
         if value and user_lower == value.lower():
             return True
 
-    logging.warning(f"is_authorized: user '{user_gmail}' is NOT authorized for course '{course_handle}'. "
-                    f"Course fields: instructor_gmail='{course_data.get('instructor_gmail')}', "
-                    f"instructor_email='{course_data.get('instructor_email')}', "
-                    f"created_by='{course_data.get('created_by')}'")
     return False
 
 @app.post("/disable_tutor")

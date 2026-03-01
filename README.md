@@ -1,84 +1,109 @@
 # AI Teaching Assistant Platform
 
-An AI-powered teaching and grading assistant for graduate courses.The system provides automated feedback, grading, and personalized tutoring for students working on assignments in Google Colab notebooks.
+An AI-powered teaching and grading assistant for graduate courses. The system provides automated feedback, grading, and personalized tutoring for students working on assignments in Google Colab notebooks.
 
 ## Overview
 
-This repository contains the **server-side API** for the AI treaching  assistant and grading system. It works in conjunction with the [colab_grading_client](https://github.com/amrutur/colab_grading_client) Python package, which provides client-side functions for students to interact with the grading assistant directly from their Google Colab notebooks.
+This repository contains the **server-side API** for the AI teaching assistant and grading system. It works in conjunction with the [colab_grading_client](https://github.com/amrutur/colab_grading_client) Python package, which provides client-side functions for students to interact with the grading assistant directly from their Google Colab notebooks.
 
 ### System Architecture
 
 ```
 ┌─────────────────────────┐
-│  Google Colab Notebook  │  ← Student workspace
+│  Google Colab Notebook  │  ← Student / Instructor workspace
 │  (colab_grading_client) │
 └───────────┬─────────────┘
-            │ HTTP/JSON
+            │ HTTP/JSON (JWT auth)
             ↓
 ┌─────────────────────────┐
 │  FastAPI Server         │  ← This repository
 │  (src/api_server.py)    │
-└───────────┬─────────────┘
-            │
-    ┌───────┴────────┐
-    ↓                ↓
-┌─────────┐    ┌──────────┐
-│ Gemini  │    │Firestore │
-│  AI     │    │ Database │
-└─────────┘    └──────────┘
+└───┬───────┬─────────┬───┘
+    │       │         │
+    ↓       ↓         ↓
+┌───────┐ ┌────────┐ ┌─────────────┐
+│Gemini │ │Firestr │ │Google Cloud │
+│2.5 Pro│ │Database│ │Storage (GCS)│
+└───────┘ └────────┘ └─────────────┘
 ```
 
 ### Firestore Database Schema
 
 ```
-db
-└── courses (collection)
-    └── {auto-id} (document)
-        ├── course_name, course_number, academic_year, institution
-        ├── instructor_email, instructor_gmail, instructor_name
-        ├── start_date, end_date, created_at
-        ├── bucket_name (derived: institution-academic_year-course_number)
-        ├── ta_name, ta_email, ta_gmail (optional)
-        └── students (subcollection)
-            └── {student-id} (document)
-                └── assignments (subcollection)
-                    └── {assignment-id} (document)
+firestore/
+├── courses/ (collection)
+│   └── {course_handle}/ (document, e.g. "iisc-2025-26-e1-254")
+│       ├── course_name, course_number, academic_year, institution
+│       ├── course_id, term_id, institution_id
+│       ├── instructor_email, instructor_gmail, instructor_name
+│       ├── ta_name, ta_email, ta_gmail (optional)
+│       ├── start_date, end_date, created_at, last_updated
+│       ├── folder_name (GCS path)
+│       ├── isactive_tutor, isactive_eval (feature flags)
+│       │
+│       ├── Notebooks/ (subcollection — rubrics & instructor content)
+│       │   └── {notebook_id}/
+│       │       ├── max_marks, context, questions, answers, outputs
+│       │       └── rag_chunks/ (subcollection — vector embeddings)
+│       │           └── {auto-id}/ (source_file, chunk_index, text, embedding)
+│       │
+│       └── Students/ (subcollection)
+│           └── {student_email}/
+│               ├── name, initialized, created_at
+│               └── Notebooks/ (subcollection — submissions & grades)
+│                   └── {notebook_id}/
+│                       ├── answer_notebook, answer_hash, submitted_at
+│                       ├── total_marks, max_marks, graded_at
+│                       ├── grader_response, graded_json
+│
+├── student_sessions/ (collection — student-agent conversation history)
+│   └── {app_name}/users/{user_email}/sessions/{session_id}/events/...
+│
+└── instructor_sessions/ (collection — instructor-agent conversation history)
+    └── {app_name}/users/{user_email}/sessions/{session_id}/events/...
 ```
 
 ## Key Features
 
 ### For Students
-- **Interactive Help**: Get instant feedback and hints on assignment questions
-- **Guided Learning**: AI provides progressive hints without revealing answers immediately (3-attempt rule)
+- **Interactive Tutoring**: Get AI-powered feedback and hints on assignment questions
+- **Guided Learning**: Progressive hints grounded in course materials and rubrics
 - **Automated Grading**: Submit notebooks for automated evaluation with detailed feedback
-- **Google OAuth Authentication**: Secure login using institutional Google accounts
+- **Google OAuth Authentication**: Secure login using Google accounts
 
 ### For Instructors
-- **Rubric-Based Grading**: Upload scoring rubrics to guide the AI grading agent
-- **Batch Grading**: Evaluate multiple student submissions efficiently
-- **Email Notifications**: Automatically notify students when grades are ready
-- **Grade Management**: View and export grades for all students
-- **Component-Based Scoring**: Flexible rubric system with partial credit support
+- **Instructor AI Assistant**: Verify content, create questions, review rubrics, and get suggestions
+- **Rubric Management**: Upload scoring rubrics to guide the AI grading agent
+- **Course Materials Upload**: Drag-and-drop browser interface for uploading PDFs to GCS
+- **RAG Index Building**: Build vector search indices over uploaded course materials
+- **Tutor & Eval Controls**: Dynamically enable/disable the tutoring and evaluation endpoints per course
+- **Batch Grading**: Evaluate multiple student submissions
+- **Email Notifications**: Notify students when grades are ready via SendGrid
+- **Grade Management**: View student marks lists and detailed grading feedback
 
 ### Technical Features
-- **Google ADK Integration**: Built on Google's Agent Development Kit (ADK)
-- **Dual AI Agents**:
-  - **Teaching Agent**: Provides interactive help and hints
-  - **Scoring Agent**: Evaluates submissions against rubrics
-- **Firestore Logging**: All interactions logged for analysis and auditing
-- **SendGrid Integration**: Reliable email delivery for grade notifications
-- **Google Drive Integration**: Access student notebooks and rubric files
+- **Google ADK Integration**: Built on Google's Agent Development Kit (ADK v1.26.0)
+- **Three Specialized AI Agents**:
+  - **Instructor Assistant Agent**: Helps instructors with content review, question creation, and rubric design
+  - **Student Tutor Agent**: Provides interactive tutoring and feedback to students
+  - **Scoring Agent**: Evaluates submissions against rubrics with component-based scoring
+- **RAG Pipeline**: Retrieval-Augmented Generation using Vertex AI embeddings (`text-embedding-004`) and Firestore vector search for grounding responses in course materials
+- **Custom Firestore Session Service**: Async session persistence with app-level and user-level state, event subcollections
+- **Dual Authentication**: OAuth 2.0 sessions (browser) and JWT tokens (API/Colab clients)
+- **GCS Signed URL Uploads**: Direct browser-to-GCS uploads via signed URLs (bypasses Cloud Run size limits)
+- **SendGrid Integration**: Email delivery for grade notifications
 - **Cloud Run Deployment**: Scalable, serverless deployment on Google Cloud
 
 ## Prerequisites
 
 ### For Development
-- Python 3.8+
+- Python 3.11+
 - Google Cloud Project with enabled APIs:
   - Firestore
   - Secret Manager
+  - Cloud Storage
+  - Vertex AI
   - Cloud Run (for production)
-  - Drive API
 - OAuth 2.0 credentials
 - SendGrid API key (for email notifications)
 
@@ -103,24 +128,21 @@ db
 
 3. **Set up environment variables**
 
-   Create a `.env` file (or set environment variables):
+   Copy `.env.example` to `.env` and fill in the values:
    ```bash
-   GOOGLE_CLOUD_PROJECT=your-project-id
-   PRODUCTION=0  # Set to 1 for production
-   ADMIN_EMAILS=admin@example.com  # Platform administrator emails
-   OAUTH_REDIRECT_URI=http://localhost:8080/callback  # Or your ngrok URL
-   SENDGRID_FROM_EMAIL=noreply@yourdomain.com
-   SERVICE_ACCOUNT_EMAIL=your-service-account@project.iam.gserviceaccount.com
-   FIRESTORE_DATABASE_ID=your-firestore-db
+   cp .env.example .env
    ```
+
+   See [Configuration](#configuration) for details on each variable.
 
 4. **Configure Google Cloud Secrets**
 
    Store sensitive credentials in Secret Manager:
-   - `oauth_client_config`: OAuth 2.0 client configuration JSON
-   - `signing_secret_key`: Session signing key
-   - `service_account_key`: Service account credentials JSON
-   - `sendgrid-api-key`: SendGrid API key
+   - OAuth client ID and secret
+   - Session signing key
+   - Firestore service account private key and key ID
+   - SendGrid API key (optional)
+   - Gemini API key (optional — uses Vertex AI service account auth if not set)
 
 5. **Run the development server**
    ```bash
@@ -173,35 +195,38 @@ Students install the client package in their Colab notebooks:
 
    Navigate to `https://your-server-url.run.app/login`
 
-2. **Upload a rubric**
+2. **Upload course materials**
 
-   Share a Google Doc with your service account containing:
+   Navigate to `https://your-server-url.run.app/upload_course_materials` to access the drag-and-drop upload interface for PDF course materials.
+
+3. **Build the RAG index**
+
+   After uploading materials, build the vector search index so the AI agents can reference them:
    ```
-   The assignment question is: [Question text]
-
-   The scoring rubric is:
-   (10 marks): Correct identification of eigenvalues
-   (5 marks): Proper matrix decomposition
-   (5 marks): Clear explanation of methodology
+   POST /build_course_index
+   { "course_id": "...", "term_id": "...", "institution_id": "..." }
    ```
 
-3. **View student grades**
+4. **Upload a rubric**
+
+   Use the `/upload_rubric` endpoint to save question rubrics (questions, answers, marks, context) for a notebook.
+
+5. **Enable tutoring and evaluation**
+   ```
+   POST /enable_tutor   — allow students to use /assist
+   POST /enable_eval    — allow students to submit for grading via /eval
+   ```
+
+6. **View student grades**
    ```python
    # In a Colab notebook with instructor credentials
    import colab_grading_client as cgc
-
-   grades = cgc.fetch_student_list(
-       assignment_name="Assignment1",
-       course_name="Linear Algebra"
-   )
+   grades = cgc.fetch_marks_list(...)
    ```
 
-4. **Send grade notifications**
+7. **Send grade notifications**
    ```python
-   cgc.notify_student_grades(
-       assignment_name="Assignment1",
-       course_name="Linear Algebra"
-   )
+   cgc.notify_student_grades(...)
    ```
 
 ## API Endpoints
@@ -212,96 +237,55 @@ API endpoints can be tested by connecting to `https://AI_tutor_server_url/docs`
 
 The API supports two authentication methods:
 
-1. **Session-based (Browser/OAuth)**: For web browsers
-2. **JWT Token-based**: For API clients like Colab notebooks
+1. **Session-based (Browser/OAuth)**: For web browsers — initiate via `/login`
+2. **JWT Token-based**: For API clients like Colab notebooks — obtain via `/get_auth_token` or `/colab_auth`
 
-#### Endpoints
-- `GET /login` - Initiate OAuth login flow
-- `GET /callback` - OAuth callback handler
-- `GET /get_auth_token` - Get JWT token after OAuth login (for API clients)
-  - Returns: `{"token": "jwt_token_string", "token_type": "Bearer", "expires_in": 86400}`
-  - Usage: Include in subsequent API calls as `Authorization: Bearer <token>`
-- `GET /logout` - Clear user session
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/login` | GET | Initiate Google OAuth login flow |
+| `/callback` | GET | OAuth callback handler |
+| `/get_auth_token` | GET | Get JWT token after OAuth login (browser session required) |
+| `/colab_auth` | POST | Authenticate Colab notebook via Google access token |
+| `/whoami` | GET | Return current user info |
+| `/logout` | GET | Clear user session |
 
-#### Using JWT Authentication from Colab
+### Student Endpoints
 
-```python
-import requests
+| Endpoint | Method | Request Model | Description |
+|----------|--------|---------------|-------------|
+| `/assist` | POST | `AssistRequest` | Get AI tutor feedback on a question (requires tutor enabled) |
+| `/grade` | POST | `GradeRequest` | Grade a single question-answer; returns marks and feedback |
+| `/eval` | POST | `EvalRequest` | Evaluate an entire notebook submission (requires eval enabled) |
 
-# Step 1: User completes OAuth in browser
-# Direct user to: https://your-server-url.run.app/login
+### Instructor Endpoints (Requires Instructor Authentication)
 
-# Step 2: After login, get JWT token (in same browser session)
-response = requests.get("https://your-server-url.run.app/get_auth_token")
-token = response.json()["token"]
+| Endpoint | Method | Request Model | Description |
+|----------|--------|---------------|-------------|
+| `/enable_tutor` | POST | `TutorInteractionRequest` | Enable the `/assist` endpoint for students |
+| `/disable_tutor` | POST | `TutorInteractionRequest` | Disable the `/assist` endpoint for students |
+| `/enable_eval` | POST | `TutorInteractionRequest` | Enable the `/eval` endpoint for students |
+| `/disable_eval` | POST | `TutorInteractionRequest` | Disable the `/eval` endpoint |
+| `/upload_rubric` | POST | `AddRubricRequest` | Upload rubric (questions, answers, marks, context) |
+| `/fetch_marks_list` | POST | `FetchMarksListRequest` | Fetch all student marks for a notebook |
+| `/fetch_grader_response` | POST | `FetchGradedRequest` | Fetch grading feedback for a specific student |
+| `/notify_student_grades` | POST | `NotifyGradedRequest` | Send grade notification email to a student |
+| `/upload_course_materials` | GET | — | Drag-and-drop file upload page for course PDFs |
+| `/validate_course_access` | GET | Query params | Validate instructor access to a course |
+| `/get_upload_url` | POST | JSON body | Generate signed GCS URL for direct browser upload |
+| `/build_course_index` | POST | `BuildCourseIndexRequest` | Build RAG vector index for course PDF materials |
 
-# Step 3: Use token in API requests
-headers = {"Authorization": f"Bearer {token}"}
-response = requests.post(
-    "https://your-server-url.run.app/some_endpoint",
-    json={...},
-    headers=headers
-)
-```
+### Admin Endpoints (Requires Admin Authentication)
 
-### Student Operations
-- `POST /assist` - Get teaching assistance for a question
-  ```json
-  {
-    "question_number": 1,
-    "question_text": "...",
-    "answer_text": "...",
-    "user_email": "student@example.com"
-  }
-  ```
-
-### Instructor Operations (Requires Instructor Authentication)
-- `POST /enable_eval` - Enable the evaluation endpoint for student submissions
-- `POST /disable_eval` - Disable the evaluation endpoint (prevents new submissions)
-- `POST /enable_tutor` - Enable the tutoring/assist endpoint for students
-- `POST /disable_tutor` - Disable the tutoring/assist endpoint
-- `POST /eval` - Submit notebook for grading (must be enabled first)
-  ```json
-  {
-    "notebook_json": {...},
-    "assignment_name": "Assignment1",
-    "course_name": "Linear Algebra",
-    "submission_hash": "md5_hash"
-  }
-  ```
-- `POST /fetch_grader_response` - Retrieve grading results for a student
-  ```json
-  {
-    "notebook_id": "Assignment1",
-    "user_email": "student@example.com"
-  }
-  ```
-- `POST /fetch_student_list` - Get all student grades for a course/assignment
-- `POST /notify_student_grades` - Send email notifications to students with their grades
-
-### Admin Operations (Requires Admin Authentication)
-- `POST /create_course` - Create a new course on the platform
-  ```json
-  {
-    "course_name": "Linear Algebra & Probability",
-    "course_number": "E1 254",
-    "academic_year": "2025-2026",
-    "institution": "IISc Bangalore",
-    "instructor_email": "prof@university.edu",
-    "instructor_gmail": "prof@gmail.com",
-    "instructor_name": "Prof. Smith",
-    "start_date": "2025-08-01T00:00:00",
-    "end_date": "2025-12-15T00:00:00",
-    "ta_name": "Jane Doe",
-    "ta_email": "jane@university.edu",
-    "ta_gmail": "jane@gmail.com"
-  }
-  ```
-  Returns the auto-generated course ID and `bucket_name`. The `bucket_name` is automatically derived as a GCS-safe concatenation of `institution`, `academic_year`, and `course_number` (lowercased, spaces replaced with hyphens). Multiple courses with the same course number are allowed (e.g. across different institutions or academic years).
+| Endpoint | Method | Request Model | Description |
+|----------|--------|---------------|-------------|
+| `/create_course` | POST | `CreateCourseRequest` | Create a new course on the platform |
 
 ### Diagnostics
-- `GET /` - Health check
-- `GET /session-test` - Test session configuration (development)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Health check / admin login page |
+| `/session-test` | GET | Test session configuration (development) |
 
 ## Configuration
 
@@ -311,20 +295,34 @@ response = requests.post(
 |----------|----------|-------------|
 | `GOOGLE_CLOUD_PROJECT` | Yes | Google Cloud project ID |
 | `PRODUCTION` | Yes | `0` for development, `1` for production |
-| `ADMIN_EMAILS` | Yes | Comma-separated list of platform admin emails |
-| `OAUTH_REDIRECT_URI` | No | OAuth redirect URI (for ngrok development) |
-| `SENDGRID_FROM_EMAIL` | Yes | Sender email for notifications |
-| `SERVICE_ACCOUNT_EMAIL` | Yes | Service account email |
+| `ADMIN_EMAIL` | Yes | Platform administrator email |
 | `FIRESTORE_DATABASE_ID` | Yes | Firestore database name |
+| `SERVICE_ACCOUNT_EMAIL` | Yes | Service account email |
+| `FIRESTORE_CLIENT_ID` | Yes | Service account client ID |
+| `OAUTH_CLIENT_ID_KEY_NAME` | Yes | Secret Manager key name for OAuth client ID |
+| `OAUTH_CLIENT_SECRET_KEY_NAME` | Yes | Secret Manager key name for OAuth client secret |
+| `SIGNING_SECRET_KEY_NAME` | Yes | Secret Manager key name for session signing key |
+| `FIRESTORE_PRIVATE_KEY_ID_KEY_NAME` | Yes | Secret Manager key name for Firestore key ID |
+| `FIRESTORE_PRIVATE_KEY_KEY_NAME` | Yes | Secret Manager key name for Firestore private key |
+| `OAUTH_REDIRECT_URI` | No | Custom OAuth redirect URI (for ngrok / Cloud Run) |
+| `SENDGRID_FROM_EMAIL` | No | Sender email for notifications (disables email if unset) |
+| `GEMINI_API_KEY_NAME` | No | Secret Manager key for Gemini API (uses Vertex AI if unset) |
+| `BUCKET_NAME` | No | GCS bucket name (defaults to `{project_id}-bucket`) |
+| `REGION` | No | GCP region for Vertex AI |
 
 ### Google Cloud Secrets
 
-Secrets are stored in Secret Manager and accessed by the server:
+Secrets are stored in Secret Manager and accessed by the server at startup:
 
-- **oauth_client_config**: OAuth 2.0 credentials
-- **signing_secret_key**: Session encryption key
-- **service_account_key**: Service account JSON key
-- **sendgrid-api-key**: SendGrid API key
+| Secret | Purpose |
+|--------|---------|
+| OAuth client ID | OAuth 2.0 client credentials |
+| OAuth client secret | OAuth 2.0 client credentials |
+| Signing secret key | JWT / session signing |
+| Firestore private key ID | Service account authentication |
+| Firestore private key | Service account authentication |
+| `sendgrid-api-key` | SendGrid email delivery (optional) |
+| Gemini API key | Direct Gemini API access (optional) |
 
 See [SENDGRID_SETUP.md](./SENDGRID_SETUP.md) for email configuration details.
 
@@ -340,7 +338,7 @@ docker build -t ai-ta .
 docker run -p 8080:8080 \
   -e GOOGLE_CLOUD_PROJECT=your-project \
   -e PRODUCTION=0 \
-  $SERVICE_NAME
+  ai-ta
 ```
 
 ### Google Cloud Run
@@ -373,36 +371,60 @@ gcloud run deploy $SERVICE_NAME \
 ```
 ai-ta/
 ├── src/
-│   ├── api_server.py      # FastAPI app, middleware, and route handlers
-│   ├── config.py          # Configuration, secrets, and service initialization
-│   ├── models.py          # Pydantic request/response models
-│   ├── auth.py            # OAuth helpers, JWT, and auth dependencies
-│   ├── database.py        # Firestore CRUD operations
-│   ├── agent.py           # AI agent definitions (teaching & scoring)
-│   ├── agent_service.py   # Agent orchestration and scoring logic
-│   ├── drive_utils.py     # Google Drive / Colab notebook utilities
-│   ├── email_service.py   # SendGrid email utility
-│   └── __init__.py        # Package initialization
-├── requirements.txt       # Python dependencies
-├── Dockerfile             # Container definition
-├── DEPLOYMENT.md          # Deployment guide
-├── SENDGRID_SETUP.md      # Email configuration guide
-└── README.md              # This file
+│   ├── api_server.py        # FastAPI app — routes, middleware, request handling
+│   ├── config.py            # Configuration, secrets, and service initialization
+│   ├── models.py            # Pydantic request/response models
+│   ├── auth.py              # OAuth helpers, JWT creation/verification
+│   ├── database.py          # Firestore CRUD (courses, students, rubrics, grades)
+│   ├── firestore_service.py # Custom async Firestore session service for ADK
+│   ├── agent.py             # AI agent definitions (instructor, tutor, scoring)
+│   ├── agent_service.py     # Agent orchestration and scoring logic
+│   ├── rag.py               # RAG pipeline (PDF chunking, embedding, retrieval)
+│   ├── drive_utils.py       # Google Drive / Colab notebook utilities
+│   ├── storage_utils.py     # GCS upload and signed URL utilities
+│   ├── email_service.py     # SendGrid email service
+│   └── aita_exceptions.py   # Custom exception classes
+├── tests/
+│   ├── conftest.py          # Pytest configuration and shared fixtures
+│   ├── test_api_endpoints.py
+│   ├── test_database.py
+│   ├── test_agent_service.py
+│   ├── test_models.py
+│   └── test_rag.py
+├── requirements.txt
+├── Dockerfile
+├── Makefile
+├── .env.example             # Environment variables template
+├── DEPLOYMENT.md            # Cloud Run deployment guide
+├── SENDGRID_SETUP.md        # Email configuration guide
+└── README.md
 ```
 
 ### AI Agents
 
-The system uses two specialized agents built with Google ADK:
+The system uses three specialized agents built with Google ADK:
 
-1. **Teaching Agent** (`ai_ta_teaching_agent`)
-   - Model: `gemini-2.0-flash`
-   - Purpose: Interactive tutoring and feedback
-   - Behavior: Provides progressive hints, reveals answers after 3 attempts
+1. **Instructor Assistant Agent** (`instructor_assist_agent`)
+   - Model: `gemini-2.5-pro`
+   - Purpose: Assists instructors with content review, question creation, rubric checking, and rubric answer generation
 
-2. **Scoring Agent** (`ai_ta_scoring_agent`)
-   - Model: `gemini-2.0-flash`
-   - Purpose: Automated grading with rubrics
-   - Behavior: Component-based scoring with partial credit
+2. **Student Tutor Agent** (`ai_tutor_agent`)
+   - Model: `gemini-2.5-pro`
+   - Purpose: Interactive tutoring — evaluates student answers against rubrics and course materials, provides feedback and hints
+
+3. **Scoring Agent** (`ai_scoring_agent`)
+   - Model: `gemini-2.5-pro`
+   - Purpose: Automated grading — component-based scoring with partial credit, matches student answers against rubric components
+
+### RAG Pipeline
+
+The system includes a Retrieval-Augmented Generation pipeline for grounding agent responses in course materials:
+
+- **Embedding model**: `text-embedding-004` (Vertex AI)
+- **Chunk size**: 1000 characters with 200-character overlap
+- **Storage**: Firestore native `Vector` type in `rag_chunks` subcollection
+- **Retrieval**: Cosine similarity search via Firestore `find_nearest()`
+- **Integration**: Retrieved context is injected into `/assist` and `/eval` agent prompts
 
 ### Local Development with ngrok
 
@@ -422,18 +444,17 @@ python src/api_server.py
 ### Logging
 
 Logs are written to:
-- Console (INFO level and above)
-- `app.log` file (DEBUG level and above)
+- Console (stdout) — INFO level and above
+- `app.log` file — DEBUG level and above
 
 ## Related Repositories
 
-- **Client Package**: [colab_grading_client](https://github.com/amrutur/colab_grading_client) - Python package for students to use in Colab notebooks
+- **Client Package**: [colab_grading_client](https://github.com/amrutur/colab_grading_client) — Python package for students and instructors to use in Colab notebooks
 
 ## Documentation
 
-- [Deployment Guide](./DEPLOYMENT.md) - Complete Cloud Run deployment instructions
-- [SendGrid Setup](./SENDGRID_SETUP.md) - Email notification configuration
-- [Gmail Setup](./GMAIL_SETUP.md) - Alternative email configuration (deprecated)
+- [Deployment Guide](./DEPLOYMENT.md) — Cloud Run deployment instructions
+- [SendGrid Setup](./SENDGRID_SETUP.md) — Email notification configuration
 
 ## Contributing
 
@@ -447,10 +468,10 @@ See [LICENSE](./LICENSE) file for details.
 
 Built with significant assistance from Google's Gemini AI and leveraging:
 - Google Agent Development Kit (ADK)
-- Google Generative AI (Gemini)
+- Google Generative AI (Gemini 2.5 Pro)
 - FastAPI
 - SendGrid
-- Google Cloud Platform
+- Google Cloud Platform (Firestore, Cloud Storage, Vertex AI, Cloud Run)
 
 ---
 

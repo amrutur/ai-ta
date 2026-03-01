@@ -155,9 +155,7 @@ class FirestoreSessionService(BaseSessionService):
         )
 
         # Store session document (without events — those go in subcollection)
-        ref = self._session_ref(app_name, user_id, session_id)
-        logger.info("Writing session to Firestore path: %s (collection=%s)", ref.path, self.collection)
-        await ref.set({
+        await self._session_ref(app_name, user_id, session_id).set({
             "app_name": app_name,
             "user_id": user_id,
             "state": session_state or {},
@@ -307,7 +305,6 @@ class FirestoreSessionService(BaseSessionService):
         # Serialize event to Firestore
         event_data = event.model_dump(mode="json", by_alias=True, exclude_none=True)
         events_ref = self._events_collection(app_name, user_id, session_id)
-        logger.debug("Appending event %s to %s (collection=%s)", event.id, events_ref.parent.path, self.collection)
         await events_ref.document(event.id).set(event_data)
 
         # Update session document (state + last_update_time)
