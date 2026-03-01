@@ -156,37 +156,50 @@ firestore/
 Students install the client package in their Colab notebooks:
 
 ```python
-!pip install git+https://github.com/amrutur/colab_grading_client.git
+!pip install colab-grading-client
 ```
 
 ## Usage
 
 ### For Students (in Google Colab)
 
-1. **Install and import the client**
+1. **Setup** — In the first code cell, configure the server URL, course details, and import the client:
    ```python
-   !pip install git+https://github.com/amrutur/colab_grading_client.git
-   import colab_grading_client as cgc
+   AI_TA_URL = "https://ai-ta-326056429620.asia-south1.run.app/"
+   course_id = "cp260"
+   notebook_id = "HW3"
+   institution_id = "IISc"
+   term_id = "2025-26"
 
-   # Set the grader server URL
-   cgc.GRADER_URL = "https://your-server-url.run.app"
+   !pip install colab-grading-client
+   import colab_grading_client as ta
    ```
 
-2. **Login**
+2. **Login** — Authenticate with Google in the next code cell:
    ```python
-   cgc.show_login_button()
+   session = ta.authenticate(AI_TA_URL)
    ```
 
-3. **Get help on a question**
-   ```python
-   # Mark your question cell with **Q1** at the start
-   # Write your answer in the next cell
-   cgc.show_teaching_assist_button(question_number=1)
+3. **Question cells** — Each question is a **text cell** that starts with:
+   ```
+   **Q<qnum>: <marks> **
+   ```
+   For example: `**Q1: 10 **`
+
+4. **Answer cells** — The answer cell (code or text) follows the question and starts with:
+   ```
+   ##Ans
    ```
 
-4. **Submit notebook for grading**
+5. **Chat cells** — After the answer cell, add a **text cell** for chatting with the TA:
+   ```
+   **Chat with TA**
+   <your questions for the TA>
+   ```
+
+6. **Get TA help** — After the chat cell, add a **code cell** to invoke the teaching assistant:
    ```python
-   cgc.show_submit_eval_button()
+   ta.show_teaching_assist_button(session, AI_TA_URL, <qnum>, notebook_id, institution_id, term_id, course_id)
    ```
 
 ### For Instructors
