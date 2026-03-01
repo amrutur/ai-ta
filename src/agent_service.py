@@ -37,7 +37,7 @@ async def run_agent_and_get_response(current_session_id: str, user_id: str, cont
     return text
 
 
-async def score_question(question: str, answer: str, rubric: str, runner: Runner, session_service: FirestoreSessionService, user_id: str) -> tuple[float, str]:
+async def score_question(question: str, answer: str, rubric: str, runner: Runner, session_service: FirestoreSessionService, user_id: str, course_material: str = "") -> tuple[float, str]:
     '''
     Score a single question-answer with the rubric using the scoring agent.
 
@@ -48,6 +48,7 @@ async def score_question(question: str, answer: str, rubric: str, runner: Runner
         runner: The runner with the scoring agent
         session_service: The session service for creating agent sessions
         user_id: The user ID of the student
+        course_material: Optional relevant course material from RAG retrieval
 
     Returns:
         Tuple of (marks, response_text)
@@ -67,7 +68,10 @@ async def score_question(question: str, answer: str, rubric: str, runner: Runner
         rubric = "{The scoring rubric is:}" + rubric + "."
 
         # Create the prompt content
-        full_prompt = question + rubric + answer
+        full_prompt = ""
+        if course_material:
+            full_prompt += "{Relevant course material:}" + course_material + " "
+        full_prompt += question + rubric + answer
         content = types.Content(
             role="user",
             parts=[types.Part.from_text(text=full_prompt)]

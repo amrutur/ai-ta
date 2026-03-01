@@ -86,6 +86,7 @@ from database import (
 from drive_utils import load_notebook_from_google_drive_sa
 from email_service import send_email
 from storage_utils import upload_blob, generate_signed_upload_url
+from rag import build_course_index, retrieve_context
 import datetime
 from collections import defaultdict
 
@@ -594,6 +595,15 @@ async def assist(query_body: AssistRequest, request: Request):
                 parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
             runner = config.runner_student
                 
+        # Retrieve relevant course material via RAG (for both instructor and student paths)
+        rag_query = " ".join(filter(None, [str(question), str(ta_chat)]))
+        if rag_query.strip():
+            rag_material = await retrieve_context(course_handle, rag_query)
+            if rag_material:
+                parts.insert(0, types.Part.from_text(
+                    text="{Relevant course material:} " + rag_material
+                ))
+
         # Create a message from the query
         content = types.Content(
             role="user",
@@ -703,9 +713,12 @@ async def eval_submission(query_body: EvalRequest, request: Request):
                 continue
 
             num_questions += 1
+            # Retrieve relevant course material for this question
+            rag_material = await retrieve_context(course_handle, rubric_question)
             marks, response_text = await score_question(
                 rubric_question, str(student_answer), str(rubric_answer),
-                runner, config.instructor_session_service, user_gmail
+                runner, config.instructor_session_service, user_gmail,
+                course_material=rag_material
             )
             total_marks += marks
             graded[qnum_str] = {'marks': marks, 'response': response_text}
@@ -1454,6 +1467,58 @@ async def get_upload_url(request: Request):
         logging.error(f"Unexpected error in get_upload_url: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}")
+
+
+@app.post("/build_course_index")
+async def build_course_index_api(request: Request):
+    '''
+    Build the RAG vector index for a course by processing all PDFs in its
+    GCS folder. Only accessible to course instructors or platform admins.
+
+    Request JSON body:
+        {
+            "course_id": "...",
+            "term_id": "...",
+            "institution_id": "..."
+        }
+
+    Returns:
+        {"status": "success", "files_processed": N, "chunks_created": M}
+    '''
+    try:
+        user = get_current_user(request)
+        body = await request.json()
+
+        course_id = body.get('course_id', '')
+        term_id = body.get('term_id', '')
+        institution_id = body.get('institution_id', '')
+
+        if not all([course_id, term_id, institution_id]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+
+        course_handle = make_course_handle(institution_id, term_id, course_id)
+
+        user_gmail = user.get('email', '').lower()
+        if not is_authorized(user_gmail, course_handle):
+            raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+
+        if course_handle not in courses:
+            raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
+
+        folder_name = courses[course_handle].get('folder_name', '')
+        if not folder_name:
+            raise HTTPException(status_code=500, detail="Course folder not configured")
+
+        logging.info(f"Instructor {user_gmail} triggered RAG index build for course {course_handle}")
+        result = await build_course_index(course_handle, folder_name)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error in build_course_index: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to build course index: {str(e)}")
 
 
 # ==================== Admin Endpoints ====================

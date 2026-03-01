@@ -188,23 +188,24 @@ class TestEvalEndpoint:
         }
 
         with patch("api_server.score_question", new_callable=AsyncMock, return_value=(10.0, "Perfect. Total marks: 10")):
-            with patch("api_server.add_student_if_not_exists", new_callable=AsyncMock):
-                with patch("api_server.add_student_notebook_if_not_exists", new_callable=AsyncMock):
-                    with patch("api_server.update_marks", new_callable=AsyncMock):
-                        resp = client.post(
-                            "/eval",
-                            json={
-                                "notebook_id": "hw1",
-                                "context": {"1": "intro"},
-                                "questions": {"1": "What is 2+2?"},
-                                "answers": {"1": "4"},
-                                "outputs": {"1": ""},
-                                "institution_id": "mit",
-                                "term_id": "2025",
-                                "course_id": "6.001",
-                            },
-                            headers=_auth_header(),
-                        )
+            with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
+                with patch("api_server.add_student_if_not_exists", new_callable=AsyncMock):
+                    with patch("api_server.add_student_notebook_if_not_exists", new_callable=AsyncMock):
+                        with patch("api_server.update_marks", new_callable=AsyncMock):
+                            resp = client.post(
+                                "/eval",
+                                json={
+                                    "notebook_id": "hw1",
+                                    "context": {"1": "intro"},
+                                    "questions": {"1": "What is 2+2?"},
+                                    "answers": {"1": "4"},
+                                    "outputs": {"1": ""},
+                                    "institution_id": "mit",
+                                    "term_id": "2025",
+                                    "course_id": "6.001",
+                                },
+                                headers=_auth_header(),
+                            )
 
         assert resp.status_code == 200
         data = resp.json()
