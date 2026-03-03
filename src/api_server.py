@@ -43,7 +43,6 @@ import uvicorn
 import requests as http_requests
 
 from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
 from google.genai import types
 
 import config
@@ -168,11 +167,6 @@ async def login(request: Request):
     """
     Redirects the user to the Google OAuth consent screen to initiate login.
     """
-    logging.info(f"Login request received from: {request.client.host if request.client else 'unknown'}")
-    logging.info(f"Login request URL: {request.url}")
-    logging.debug(f"Login request headers: {dict(request.headers)}")
-    logging.debug(f"Login existing cookies: {request.cookies}")
-
     flow = Flow.from_client_config(
         client_config=config.client_config,
         scopes=config.SCOPES,
@@ -187,9 +181,6 @@ async def login(request: Request):
     # Store the state and PKCE code_verifier in the session for the callback.
     request.session['state'] = state
     request.session['code_verifier'] = flow.code_verifier
-    logging.info(f"Login: Generated and stored state in session: {state[:10]}...")
-    logging.info(f"Login: Using redirect URI: {config.client_config['web']['redirect_uris'][config.REDIRECT_URI_INDEX]}")
-    logging.debug(f"Login: Session data after storing state: {dict(request.session)}")
 
     # Use HTML redirect to ensure session cookie is set before redirect
     # Direct RedirectResponse can sometimes redirect before session middleware sets the cookie
@@ -206,7 +197,6 @@ async def login(request: Request):
     </html>
     """
 
-    logging.info(f"Login: Redirecting to Google OAuth via HTML redirect: {authorization_url[:80]}...")
     return HTMLResponse(content=html_content, status_code=200)
 
 @app.get("/callback", tags=["Authentication"])
@@ -215,30 +205,16 @@ async def oauth_callback(request: Request):
     Handles the callback from Google after user consent.
     Exchanges the authorization code for credentials and creates a user session.
     """
-    logging.info(f"Callback request received from: {request.client.host if request.client else 'unknown'}")
-    logging.info(f"Callback request URL: {request.url}")
-    logging.debug(f"Callback request headers: {dict(request.headers)}")
-    logging.info(f"Callback cookies received: {list(request.cookies.keys())}")
-
     state = request.session.get('state')
     query_state = request.query_params.get('state')
 
-    logging.info(f"Callback: Session state: {state[:10] if state else 'None'}...")
-    logging.info(f"Callback: Query state: {query_state[:10] if query_state else 'None'}...")
-    logging.debug(f"Callback: Full session data: {dict(request.session)}")
-    logging.debug(f"Callback: Full cookies: {request.cookies}")
-
     if not state:
-        logging.error("Callback: No state found in session. Session may not be persisting.")
-        logging.error(f"Callback: Available session keys: {list(request.session.keys())}")
-        logging.error(f"Callback: Cookies present: {list(request.cookies.keys())}")
         raise HTTPException(
             status_code=400,
             detail="No state found in session. Session cookies may not be working. Please try logging in again."
         )
 
     if state != query_state:
-        logging.error(f"Callback: State mismatch. Session: {state}, Query: {query_state}")
         raise HTTPException(status_code=400, detail="State mismatch, possible CSRF attack.")
 
 
@@ -262,14 +238,16 @@ async def oauth_callback(request: Request):
     forwarded_proto = request.headers.get('X-Forwarded-Proto', '')
     if forwarded_proto == 'https' and authorization_response.startswith('http://'):
         authorization_response = authorization_response.replace('http://', 'https://', 1)
-        logging.info(f"Callback: Corrected authorization_response from HTTP to HTTPS (X-Forwarded-Proto: https)")
-
-    logging.info(f"Callback: Using authorization_response: {authorization_response[:100]}...")
-
-    # Restore the PKCE code_verifier so oauthlib can complete the exchange
+    # Restore the PKCE code_verifier so oauthlib can complete the exchange.
+    # fetch_token is a synchronous HTTP call; run it in a thread so we don't
+    # block the async event loop.
     code_verifier = request.session.get('code_verifier')
     try:
-        flow.fetch_token(authorization_response=authorization_response, code_verifier=code_verifier)
+        await asyncio.to_thread(
+            flow.fetch_token,
+            authorization_response=authorization_response,
+            code_verifier=code_verifier,
+        )
     except Exception as e:
         logging.error(f"OAuth token exchange failed: {e}")
         traceback.print_exc()
@@ -299,9 +277,18 @@ async def oauth_callback(request: Request):
     # client_secret, etc.) and can push the cookie past the browser's 4KB limit,
     # causing "Failed to Load Session" on refresh.
 
+    # Fetch user info directly instead of using the discovery client.
+    # build('oauth2', 'v2', ...) downloads a discovery document on every call,
+    # adding several seconds of synchronous blocking latency.
     try:
-        userinfo_service = build('oauth2', 'v2', credentials=flow_creds)
-        request.session['user'] = userinfo_service.userinfo().get().execute()
+        userinfo_resp = await asyncio.to_thread(
+            http_requests.get,
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {flow_creds.token}"},
+            timeout=10,
+        )
+        userinfo_resp.raise_for_status()
+        request.session['user'] = userinfo_resp.json()
     except Exception as e:
         logging.error(f"Failed to retrieve user info from Google: {e}")
         traceback.print_exc()
