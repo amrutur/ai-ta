@@ -36,7 +36,7 @@ import uuid
 from typing import Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File, Form
-from fastapi.responses import  HTMLResponse
+from fastapi.responses import  HTMLResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 import uvicorn
@@ -464,15 +464,19 @@ async def logout(request: Request):
 
 # ==================== Student-Facing Endpoints ====================
 
-@app.post("/assist", response_model=AssistResponse)
+@app.post("/assist")
 async def assist(query_body: AssistRequest, request: Request):
 
-    ''' 
+    '''
     Call the AI Tutor agent to get assistance for a question.
     For a student: it can be used to get hints for a question, or to check if the answer is correct without giving away the marks.
     For a TA/Instructor: It can be used to get suggestions for the question, grading an answer, or to check if the answer is correct along with the suggested marks.
-    '''
 
+    Returns a streaming response with newline-delimited JSON lines:
+      {"type": "progress", "message": "..."}   – progress updates
+      {"type": "response", "response": "..."}   – final AI response
+      {"type": "error", "detail": "..."}         – on failure
+    '''
 
     user = get_current_user(request)
     user_gmail = user.get('email')
@@ -480,139 +484,135 @@ async def assist(query_body: AssistRequest, request: Request):
 
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
-    #this will be used to create the interaction session for the chat in the db
-    initial_state  = {
-        'course_handle': course_handle
-    }
-
     is_instructor = is_authorized(user_gmail, course_handle)
 
     # Check if tutor is disabled by instructor
     if not is_instructor and not courses[course_handle].get('isactive_tutor', False):
         raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
 
-    try:
-        parts = []
-        context = query_body.context
-        question=query_body.question.get("question", "")
-        ta_chat = query_body.ta_chat
-        answer = query_body.answer
-        output  = query_body.output
-        qnum = query_body.qnum
-        notebook_id = query_body.notebook_id
+    async def _generate():
+        """Async generator that yields newline-delimited JSON progress/response lines."""
+        try:
+            parts = []
+            context = query_body.context
+            question = query_body.question.get("question", "")
+            ta_chat = query_body.ta_chat
+            answer = query_body.answer
+            output = query_body.output
+            qnum = query_body.qnum
+            notebook_id = query_body.notebook_id
+            session_id = f"{course_handle}_{notebook_id}"
+            initial_state = {'course_handle': course_handle}
 
+            # --- Ensure DB records and session exist (+ RAG retrieval) concurrently ---
 
-        if is_instructor:
-            
-            await add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
+            async def _ensure_session_and_db():
+                if is_instructor:
+                    await add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
+                    existing = await config.instructor_session_service.get_session(
+                        app_name=config.runner_instructor.app_name,
+                        user_id=user_gmail, session_id=session_id,
+                    )
+                    if not existing:
+                        await config.instructor_session_service.create_session(
+                            app_name=config.runner_instructor.app_name,
+                            user_id=user_gmail, session_id=session_id,
+                            state=initial_state,
+                        )
+                else:
+                    await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id)
+                    existing = await config.student_session_service.get_session(
+                        app_name=config.runner_student.app_name,
+                        user_id=user_gmail, session_id=session_id,
+                    )
+                    if not existing:
+                        await config.student_session_service.create_session(
+                            app_name=config.runner_student.app_name,
+                            user_id=user_gmail, session_id=session_id,
+                            state=initial_state,
+                        )
 
-            #check if the chat interaction session alreay exists. If not create
-            existing = await config.instructor_session_service.get_session(
-                app_name=config.runner_instructor.app_name,
-                user_id=user_gmail,
-                session_id=f"{course_handle}_{notebook_id}",
+            async def _retrieve_rag():
+                rag_query = " ".join(filter(None, [str(question), str(ta_chat)]))
+                if rag_query.strip():
+                    return await retrieve_context(course_handle, rag_query)
+                return ""
+
+            # Run DB/session setup and RAG retrieval concurrently
+            _, rag_material = await asyncio.gather(
+                _ensure_session_and_db(),
+                _retrieve_rag(),
             )
 
-            if not existing:
-                await config.instructor_session_service.create_session(
-                    app_name=config.runner_instructor.app_name,
-                    user_id=user_gmail,
-                    session_id=f"{course_handle}_{notebook_id}",
-                    state=initial_state
-                )
-            # the insrtuctor is asking the agent - so we should provide the full context, question, 
-            # instructor's answer and output to get better suggestions from the agent for grading and 
-            # providing feedback to the students. The instructor can also ask the agent to check if 
-            # the answer is correct without providing the rubric (by not providing the answer and 
-            # output in the query body), in that case we should not provide the rubric to the agent 
-            # as well to get a more unbiased response from the agent about the correctness of the 
-            # answer.
-            if context:
-                parts.append(types.Part.from_text(text="{The topic content is:} " + str(context)))
-            if question:
+            # --- Build the prompt parts ---
+
+            if is_instructor:
+                # Provide full context so the agent can give instructor-level suggestions
+                if context:
+                    parts.append(types.Part.from_text(text="{The topic content is:} " + str(context)))
+                if question:
+                    parts.append(types.Part.from_text(text="{The question is:} " + str(question)))
+                if ta_chat:
+                    parts.append(types.Part.from_text(text="{The instructor asks:} " + str(ta_chat)))
+                if answer:
+                    parts.append(types.Part.from_text(text="{The instructor's answer is} " + str(answer)))
+                if output:
+                    parts.append(types.Part.from_text(text="{The instructor's code output is} " + json.dumps(output)))
+                runner = config.runner_instructor
+            else:
+                # Student path — use cached rubric data without revealing the answer
+                if notebook_id not in courses[course_handle]:
+                    yield json.dumps({"type": "error", "detail": "Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first."}) + "\n"
+                    return
+
+                context = courses[course_handle][notebook_id]['context'].get(str(qnum))
+                question = courses[course_handle][notebook_id]['questions'].get(str(qnum))
+                if question is None:
+                    yield json.dumps({"type": "error", "detail": "Question not found in rubric for this course and notebook."}) + "\n"
+                    return
+                rubric_answer = courses[course_handle][notebook_id]['answers'].get(str(qnum))
+                rubric_output = courses[course_handle][notebook_id].get('outputs', {}).get(str(qnum))
+
+                if context is not None:
+                    parts.append(types.Part.from_text(text="{The context is:} " + str(context)))
                 parts.append(types.Part.from_text(text="{The question is:} " + str(question)))
-            if ta_chat:
-                parts.append(types.Part.from_text(text="{The instructor asks:} " + str(ta_chat)))        
-            if answer:
-                parts.append(types.Part.from_text(text="{The instructor's answer is} " + str(answer)))
-            if output:
-                parts.append(types.Part.from_text(text="{The instructor's code output is} " + json.dumps(output)))
-            runner = config.runner_instructor
-        else:
-            # student asking the agent - so we can use the cached context and question from the rubric 
-            # if available to provide better assistance, but we should not use the instructor's 
-            # answer and output in that case as it may give away the answer to the student
-            
-            if notebook_id not in courses[course_handle]:
-                raise HTTPException(status_code=404, detail="Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first.")
+                parts.append(types.Part.from_text(text="{The student's answer is} " + str(answer)))
+                if output:
+                    parts.append(types.Part.from_text(text="{The student's code output is} " + json.dumps(output)))
+                parts.append(types.Part.from_text(text="{The student asks:} " + str(ta_chat)))
+                if rubric_answer is not None:
+                    parts.append(types.Part.from_text(text="{The rubric is} " + str(rubric_answer)))
+                if rubric_output is not None:
+                    parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
+                runner = config.runner_student
 
-            await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id) #ensure the student is added to the course in the database
-            #check if the chat interaction session alreay exists. If not create
-
-            existing = await config.student_session_service.get_session(
-                app_name=config.runner_student.app_name,
-                user_id=user_gmail,
-                session_id=f"{course_handle}_{notebook_id}",
-            )
-
-            if not existing:
-                await config.student_session_service.create_session(
-                    app_name=config.runner_student.app_name,
-                    user_id=user_gmail,
-                    session_id=f"{course_handle}_{notebook_id}",
-                    state=initial_state
-                )
-            #get the context and question from rubric (stored in the cache)
-            context = courses[course_handle][notebook_id]['context'].get(str(qnum))
-            question = courses[course_handle][notebook_id]['questions'].get(str(qnum))
-            if question is None:
-                raise HTTPException(status_code=404, detail="Question not found in rubric for this course and notebook.")
-            rubric_answer = courses[course_handle][notebook_id]['answers'].get(str(qnum))
-            rubric_output = courses[course_handle][notebook_id].get('outputs', {}).get(str(qnum))
-            
-            if context is not None:
-                parts.append(types.Part.from_text(text="{The context is:} " + str(context)))
-            parts.append(types.Part.from_text(text="{The question is:} " + str(question)))
-            parts.append(types.Part.from_text(text="{The student's answer is} " + str(answer)))
-            if output:
-                parts.append(types.Part.from_text(text="{The student's code output is} " + json.dumps(output)))
-            parts.append(types.Part.from_text(text="{The student asks:} " + str(ta_chat)))
-            if rubric_answer is not None:
-                parts.append(types.Part.from_text(text="{The rubric is} " + str(rubric_answer)))
-            if rubric_output is not None:
-                parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
-            runner = config.runner_student
-                
-        # Retrieve relevant course material via RAG (for both instructor and student paths)
-        rag_query = " ".join(filter(None, [str(question), str(ta_chat)]))
-        if rag_query.strip():
-            rag_material = await retrieve_context(course_handle, rag_query)
+            # Prepend RAG material if available
             if rag_material:
                 parts.insert(0, types.Part.from_text(
                     text="{Relevant course material:} " + rag_material
                 ))
 
-        # Create a message from the query
-        content = types.Content(
-            role="user",
-            parts=parts
-        )
+            content = types.Content(role="user", parts=parts)
 
-        # Attempt to get the response using the current session ID
-        response_text = await run_agent_and_get_response(f"{course_handle}_{notebook_id}", user_gmail, content, runner)
+            yield json.dumps({"type": "progress", "message": "Formed the prompt and asking the Tutor now..."}) + "\n"
 
-        if not response_text:
-            raise HTTPException(status_code=500, detail="Failed to generate response")
+            # --- Call the agent ---
+            response_text = await run_agent_and_get_response(session_id, user_gmail, content, runner)
 
-        return AssistResponse(
-            response=response_text
-            )
+            if not response_text:
+                yield json.dumps({"type": "error", "detail": "Failed to generate response"}) + "\n"
+                return
 
-    except Exception as e:
-        # By logging the exception with its traceback, you can see the root cause in your server logs.
-        logging.error("An exception occurred during query processing: %s", e)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+            yield json.dumps({"type": "response", "response": response_text}) + "\n"
+
+        except HTTPException as e:
+            yield json.dumps({"type": "error", "detail": e.detail}) + "\n"
+        except Exception as e:
+            logging.error("An exception occurred during query processing: %s", e)
+            traceback.print_exc()
+            yield json.dumps({"type": "error", "detail": f"An internal error occurred: {e}"}) + "\n"
+
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
 
 @app.post("/grade", response_model=GradeResponse)
