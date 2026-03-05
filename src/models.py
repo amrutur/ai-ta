@@ -4,7 +4,7 @@ Pydantic request/response models for the API endpoints.
 
 from datetime import datetime
 from pydantic import BaseModel, AnyUrl, EmailStr
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 
 class QueryRequest(BaseModel):
@@ -23,7 +23,7 @@ class AssistRequest(BaseModel):
     qnum: int
     context: str
     question: Dict[str,Any]
-    answer: str
+    answer: List[Dict[str, Any]]
     output: Dict[str,Any]
     ta_chat: str
     notebook_id: str

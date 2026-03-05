@@ -44,7 +44,7 @@ class TestAssistRequest:
             qnum=1,
             context="some context",
             question={"question": "What is 2+2?"},
-            answer="4",
+            answer=[{"percent": 100, "component": "4"}],
             output={"stdout": "4"},
             ta_chat="Is this correct?",
             notebook_id="hw1",

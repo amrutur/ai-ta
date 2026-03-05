@@ -497,7 +497,11 @@ async def assist(query_body: AssistRequest, request: Request):
             context = query_body.context
             question = query_body.question.get("question", "")
             ta_chat = query_body.ta_chat
-            answer = query_body.answer
+            # Format answer components: [{percent, component}, ...] → readable string
+            answer = " ".join(
+                f"[{a.get('percent', '')}%] {a.get('component', '')}"
+                for a in query_body.answer
+            ) if query_body.answer else ""
             output = query_body.output
             qnum = query_body.qnum
             notebook_id = query_body.notebook_id

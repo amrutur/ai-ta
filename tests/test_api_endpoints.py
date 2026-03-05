@@ -64,7 +64,7 @@ class TestUnauthenticated:
     def test_assist_requires_auth(self, client):
         """POST /assist without auth should return 401."""
         resp = client.post("/assist", json={
-            "qnum": 1, "context": "", "question": {}, "answer": "",
+            "qnum": 1, "context": "", "question": {}, "answer": [],
             "output": {}, "ta_chat": "", "notebook_id": "hw1",
             "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
         })
@@ -91,7 +91,7 @@ class TestAssistEndpoint:
             "/assist",
             json={
                 "qnum": 1, "context": "ctx", "question": {"question": "Q"},
-                "answer": "A", "output": {}, "ta_chat": "help",
+                "answer": [{"percent": 100, "component": "A"}], "output": {}, "ta_chat": "help",
                 "notebook_id": "hw1",
                 "institution_id": "mit", "term_id": "2025", "course_id": "nonexistent",
             },
