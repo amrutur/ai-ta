@@ -182,7 +182,7 @@ class TestEvalEndpoint:
             "isactive_eval": True,
             "hw1": {
                 "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
-                "answers": {"1": [{"percent": 1.0, "component": "4"}]},
+                "answers": {"1": [{"percent": 100, "component": "4"}]},
                 "outputs": {"1": ""},
                 "max_marks": 10.0,
             },
@@ -199,7 +199,7 @@ class TestEvalEndpoint:
                                     "notebook_id": "hw1",
                                     "context": {"1": "intro"},
                                     "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
-                                    "answers": {"1": [{"percent": 1.0, "component": "4"}]},
+                                    "answers": {"1": [{"percent": 100, "component": "4"}]},
                                     "outputs": {"1": ""},
                                     "institution_id": "mit",
                                     "term_id": "2025",
