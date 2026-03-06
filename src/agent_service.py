@@ -18,23 +18,27 @@ from google.adk import Runner
 from firestore_service import FirestoreSessionService
 from google.genai import types
 
+# Limit concurrent Gemini API calls to avoid rate-limit errors
+_gemini_semaphore = asyncio.Semaphore(5)
+
 async def run_agent_and_get_response(current_session_id: str, user_id: str, content: types.Content, runner: Runner) -> str:
     """Helper to run the agent and aggregate the response text from the stream."""
-    response_stream = runner.run_async(
-        user_id=user_id,
-        session_id=current_session_id,
-        new_message=content,
-    )
+    async with _gemini_semaphore:
+        response_stream = runner.run_async(
+            user_id=user_id,
+            session_id=current_session_id,
+            new_message=content,
+        )
 
-    text = ""
-    async for event in response_stream:
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                text += part.text
-        if event.is_final_response():
-            break
+        text = ""
+        async for event in response_stream:
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    text += part.text
+            if event.is_final_response():
+                break
 
-    return text
+        return text
 
 
 async def score_question(question: str, answer: str, rubric: str, runner: Runner, session_service: FirestoreSessionService, user_id: str, course_material: str = "") -> tuple[float, str]:
