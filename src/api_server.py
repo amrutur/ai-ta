@@ -498,10 +498,15 @@ async def assist(query_body: AssistRequest, request: Request):
             question = query_body.question.get("question", "")
             ta_chat = query_body.ta_chat
             # Format answer components: [{percent, component}, ...] → readable string
+#            answer = " ".join(
+#                f"[{a.get('percent', '')}%] {a.get('component', '')}"
+#                for a in query_body.answer
+#            ) if query_body.answer else ""
             answer = " ".join(
-                f"[{a.get('percent', '')}%] {a.get('component', '')}"
+                f"{a.get('component', '')}"
                 for a in query_body.answer
             ) if query_body.answer else ""
+
             output = query_body.output
             qnum = query_body.qnum
             notebook_id = query_body.notebook_id
@@ -514,7 +519,11 @@ async def assist(query_body: AssistRequest, request: Request):
                 if is_instructor:
                     await add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
                     existing = await config.instructor_session_service.get_session(
-                        app_name=config.runner_instructor.app_name,
+                  answer = " ".join(
+                f"{a.get('component', '')}"
+                for a in query_body.answer
+            ) if query_body.answer else ""
+                  app_name=config.runner_instructor.app_name,
                         user_id=user_gmail, session_id=session_id,
                     )
                     if not existing:
@@ -678,7 +687,12 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     notebook_id = query_body.notebook_id
 
     try:
-        # Get rubric data from the course cache
+
+        if notebook_id not in courses[course_handle]:
+            yield json.dumps({"type": "error", "detail": "Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first."}) + "\n"
+            return
+
+        # Get rubric from the course cache
         rubric_data = courses[course_handle].get(notebook_id)
         if not rubric_data:
             raise HTTPException(status_code=404, detail=f"Rubric data not found for notebook '{notebook_id}' in course '{course_handle}'.")
@@ -697,18 +711,28 @@ async def eval_submission(query_body: EvalRequest, request: Request):
         graded = {}
 
         for qnum_str, student_answer in query_body.answers.items():
-            rubric_question = rubric_questions.get(qnum_str, '')
+            rubric_question = rubric_questions.get(qnum_str, '').get('question', '')
+            rubric_question_marks = rubric_questions.get(qnum_str).get('marks', 10.0) #if no marks is given, defaults to 10
             rubric_answer = rubric_answers.get(qnum_str, '')
+            rubric_answer_str = " ".join(
+                f"({a.get('percent')*rubric_question_marks}) {a.get('component', '')}"
+                for a in rubric_answer
+            )
+            student_answer_str = " ".join(
+                f"{a.get('component', '')}"
+                for a in student_answer
+            ) if student_answer else ""
+
 
             if not rubric_question:
-                logging.warning(f"No rubric question found for Q{qnum_str}. Skipping.")
-                continue
+                logging.error(f"No rubric question found for Q{qnum_str}. Skipping.")
+                raise HTTPException(status_code=404, detail=f"Rubric question not found for question number '{qnum_str}' in notebook '{notebook_id}'.")
 
             num_questions += 1
             # Retrieve relevant course material for this question
             rag_material = await retrieve_context(course_handle, rubric_question)
             marks, response_text = await score_question(
-                rubric_question, str(student_answer), str(rubric_answer),
+                rubric_question, str(student_answer_str), str(rubric_answer_str),
                 runner, config.instructor_session_service, user_gmail,
                 course_material=rag_material
             )
