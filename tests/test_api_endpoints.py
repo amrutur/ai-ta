@@ -5,6 +5,7 @@ Uses FastAPI's TestClient with a fully mocked backend. The mock ``config``
 module is injected by conftest.py before ``api_server`` is imported.
 """
 
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -208,8 +209,15 @@ class TestEvalEndpoint:
                             )
 
         assert resp.status_code == 200
-        data = resp.json()
-        assert "10.0" in data["response"]
+        # Streaming NDJSON: parse each line
+        lines = [json.loads(line) for line in resp.text.strip().split("\n") if line]
+        # Should have a progress message and a final response
+        progress_msgs = [l for l in lines if l["type"] == "progress"]
+        response_msgs = [l for l in lines if l["type"] == "response"]
+        assert len(progress_msgs) >= 1
+        assert "Done evaluating question 1" in progress_msgs[0]["message"]
+        assert len(response_msgs) == 1
+        assert "10.0" in response_msgs[0]["response"]
 
         # Clean up cache
         del courses[course_handle]

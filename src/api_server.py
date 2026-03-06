@@ -657,13 +657,18 @@ async def grade(query_body: GradeRequest, request: Request):
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
-@app.post("/eval", response_model=EvalResponse)
+@app.post("/eval")
 async def eval_submission(query_body: EvalRequest, request: Request):
     '''Evaluate the submitted notebook by grading all questions using the scoring agent.
 
     The client sends pre-parsed questions, answers, and outputs from the student's notebook.
     The rubric (expected answers) is loaded from the server-side course cache.
     Each question is scored individually using the scoring agent.
+
+    Returns a streaming response with newline-delimited JSON lines:
+      {"type": "progress", "message": "..."}   – per-question progress
+      {"type": "response", "response": "..."}   – final summary
+      {"type": "error", "detail": "..."}         – on failure
     '''
 
     user = get_current_user(request)
@@ -682,74 +687,76 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     runner = config.runner_scoring
     notebook_id = query_body.notebook_id
 
-    try:
+    async def _generate():
+        try:
+            if notebook_id not in courses[course_handle]:
+                yield json.dumps({"type": "error", "detail": "Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first."}) + "\n"
+                return
 
-        if notebook_id not in courses[course_handle]:
-            raise HTTPException(status_code=404, detail="Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first.")
+            # Get rubric from the course cache
+            rubric_data = courses[course_handle].get(notebook_id)
+            if not rubric_data:
+                yield json.dumps({"type": "error", "detail": f"Rubric data not found for notebook '{notebook_id}' in course '{course_handle}'."}) + "\n"
+                return
 
-        # Get rubric from the course cache
-        rubric_data = courses[course_handle].get(notebook_id)
-        if not rubric_data:
-            raise HTTPException(status_code=404, detail=f"Rubric data not found for notebook '{notebook_id}' in course '{course_handle}'.")
+            rubric_questions = rubric_data.get('questions', {})
+            rubric_answers = rubric_data.get('answers', {})
+            max_marks_total = rubric_data.get('max_marks', 0.0)
 
-        rubric_questions = rubric_data.get('questions', {})
-        rubric_answers = rubric_data.get('answers', {})
-        max_marks_total = rubric_data.get('max_marks', 0.0)
+            # Ensure student record exists
+            await add_student_if_not_exists(config.db, course_handle, user_gmail, user_name)
+            await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id)
 
-        # Ensure student record exists
-        await add_student_if_not_exists(config.db, course_handle, user_gmail, user_name)
-        await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id)
+            # Score each question
+            total_marks = 0.0
+            num_questions = 0
+            graded = {}
 
-        # Score each question
-        total_marks = 0.0
-        num_questions = 0
-        graded = {}
+            for qnum_str, student_answer in query_body.answers.items():
+                rubric_question = rubric_questions.get(qnum_str, '').get('question', '')
+                rubric_question_marks = rubric_questions.get(qnum_str).get('marks', 10.0) #if no marks is given, defaults to 10
+                rubric_answer = rubric_answers.get(qnum_str, '')
+                rubric_answer_str = " ".join(
+                    f"({a.get('percent')*rubric_question_marks}) {a.get('component', '')}"
+                    for a in rubric_answer
+                )
+                student_answer_str = " ".join(
+                    f"{a.get('component', '')}"
+                    for a in student_answer
+                ) if student_answer else ""
 
-        for qnum_str, student_answer in query_body.answers.items():
-            rubric_question = rubric_questions.get(qnum_str, '').get('question', '')
-            rubric_question_marks = rubric_questions.get(qnum_str).get('marks', 10.0) #if no marks is given, defaults to 10
-            rubric_answer = rubric_answers.get(qnum_str, '')
-            rubric_answer_str = " ".join(
-                f"({a.get('percent')*rubric_question_marks}) {a.get('component', '')}"
-                for a in rubric_answer
-            )
-            student_answer_str = " ".join(
-                f"{a.get('component', '')}"
-                for a in student_answer
-            ) if student_answer else ""
+                if not rubric_question:
+                    logging.error(f"No rubric question found for Q{qnum_str}. Skipping.")
+                    yield json.dumps({"type": "error", "detail": f"Rubric question not found for question number '{qnum_str}' in notebook '{notebook_id}'."}) + "\n"
+                    return
 
+                num_questions += 1
+                # Retrieve relevant course material for this question
+                rag_material = await retrieve_context(course_handle, rubric_question)
+                marks, response_text = await score_question(
+                    rubric_question, str(student_answer_str), str(rubric_answer_str),
+                    runner, config.instructor_session_service, user_gmail,
+                    course_material=rag_material
+                )
+                total_marks += marks
+                graded[qnum_str] = {'marks': marks, 'response': response_text}
+                logging.info(f"Graded Q{qnum_str}: {marks} marks")
 
-            if not rubric_question:
-                logging.error(f"No rubric question found for Q{qnum_str}. Skipping.")
-                raise HTTPException(status_code=404, detail=f"Rubric question not found for question number '{qnum_str}' in notebook '{notebook_id}'.")
+                yield json.dumps({"type": "progress", "message": f"Done evaluating question {qnum_str}"}) + "\n"
 
-            num_questions += 1
-            # Retrieve relevant course material for this question
-            rag_material = await retrieve_context(course_handle, rubric_question)
-            marks, response_text = await score_question(
-                rubric_question, str(student_answer_str), str(rubric_answer_str),
-                runner, config.instructor_session_service, user_gmail,
-                course_material=rag_material
-            )
-            total_marks += marks
-            graded[qnum_str] = {'marks': marks, 'response': response_text}
-            logging.info(f"Graded Q{qnum_str}: {marks} marks")
+            logging.info(f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions.")
 
-        logging.info(f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions.")
+            # Store marks in database
+            await update_marks(config.db, course_handle, user_gmail, notebook_id, total_marks, max_marks_total, graded)
 
-        # Store marks in database
-        await update_marks(config.db, course_handle, user_gmail, notebook_id, total_marks, max_marks_total, graded)
+            yield json.dumps({"type": "response", "response": f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions."}) + "\n"
 
-        return EvalResponse(
-            response=f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions."
-        )
+        except Exception as e:
+            logging.error("An exception occurred during evaluation: %s", e)
+            traceback.print_exc()
+            yield json.dumps({"type": "error", "detail": f"An internal error occurred: {e}"}) + "\n"
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error("An exception occurred during evaluation: %s", e)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
 
 # ==================== Utility Endpoints ====================
