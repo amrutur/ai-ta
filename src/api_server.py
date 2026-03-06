@@ -717,9 +717,10 @@ async def eval_submission(query_body: EvalRequest, request: Request):
                 rubric_question_marks = rubric_questions.get(qnum_str).get('marks', 10.0) #if no marks is given, defaults to 10
                 rubric_answer = rubric_answers.get(qnum_str, '')
                 rubric_answer_str = " ".join(
-                    f"({a.get('percent')*rubric_question_marks}) {a.get('component', '')}"
+                    f"({float(a.get('percent'))/100.0*rubric_question_marks}) {a.get('component', '')}"
                     for a in rubric_answer
                 )
+                logging.info(f"Grading Q{qnum_str}: rubric question='{rubric_question}', rubric answer='{rubric_answer_str}'")
                 student_answer_str = " ".join(
                     f"{a.get('component', '')}"
                     for a in student_answer
