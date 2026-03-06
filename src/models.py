@@ -138,8 +138,8 @@ class AddRubricRequest(BaseModel):
     max_marks: float
     context: Dict[str,Any]
     questions: Dict[str,Any]
-    answer: List[Dict[str, Any]]
-    outputs: Dict[str,Any]  
+    answers: Dict[str, Any]
+    outputs: Dict[str,Any]
     institution_id: str
     term_id: str
     course_id: str

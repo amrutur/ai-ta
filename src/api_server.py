@@ -519,11 +519,7 @@ async def assist(query_body: AssistRequest, request: Request):
                 if is_instructor:
                     await add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
                     existing = await config.instructor_session_service.get_session(
-                  answer = " ".join(
-                f"{a.get('component', '')}"
-                for a in query_body.answer
-            ) if query_body.answer else ""
-                  app_name=config.runner_instructor.app_name,
+                        app_name=config.runner_instructor.app_name,
                         user_id=user_gmail, session_id=session_id,
                     )
                     if not existing:
@@ -689,8 +685,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     try:
 
         if notebook_id not in courses[course_handle]:
-            yield json.dumps({"type": "error", "detail": "Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first."}) + "\n"
-            return
+            raise HTTPException(status_code=404, detail="Rubric notebook data not found for this course and notebook. Please ask the instructor to add the rubric first.")
 
         # Get rubric from the course cache
         rubric_data = courses[course_handle].get(notebook_id)
