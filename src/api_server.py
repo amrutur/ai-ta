@@ -709,6 +709,14 @@ async def eval_submission(query_body: EvalRequest, request: Request):
                 add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id),
             )
 
+            # Store student answers in the notebook document
+            notebook_ref = (config.db.collection(u'courses').document(course_handle)
+                            .collection(u'Students').document(user_gmail)
+                            .collection(u'Notebooks').document(notebook_id))
+            await notebook_ref.update({u'answers': query_body.answers})
+
+            yield json.dumps({"type": "progress", "message": "Your notebook has been saved in the server and has also been queued for evaluation. Once the evaluation is complete, the graded notebook will be sent via email."}) + "\n"
+
             # --- Build per-question grading tasks ---
 
             async def _grade_one(qnum_str, student_answer):
