@@ -703,18 +703,18 @@ async def eval_submission(query_body: EvalRequest, request: Request):
             rubric_answers = rubric_data.get('answers', {})
             max_marks_total = rubric_data.get('max_marks', 0.0)
 
-            # Ensure student record exists
-            await add_student_if_not_exists(config.db, course_handle, user_gmail, user_name)
-            await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id)
+            # Ensure student record exists (run both DB calls concurrently)
+            await asyncio.gather(
+                add_student_if_not_exists(config.db, course_handle, user_gmail, user_name),
+                add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id),
+            )
 
-            # Score each question
-            total_marks = 0.0
-            num_questions = 0
-            graded = {}
+            # --- Build per-question grading tasks ---
 
-            for qnum_str, student_answer in query_body.answers.items():
+            async def _grade_one(qnum_str, student_answer):
+                """Grade a single question: RAG retrieval + scoring agent call."""
                 rubric_question = rubric_questions.get(qnum_str, '').get('question', '')
-                rubric_question_marks = rubric_questions.get(qnum_str).get('marks', 10.0) #if no marks is given, defaults to 10
+                rubric_question_marks = rubric_questions.get(qnum_str).get('marks', 10.0)
                 rubric_answer = rubric_answers.get(qnum_str, '')
                 rubric_answer_str = " ".join(
                     f"({float(a.get('percent'))/100.0*rubric_question_marks}) {a.get('component', '')}"
@@ -728,21 +728,31 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
                 if not rubric_question:
                     logging.error(f"No rubric question found for Q{qnum_str}. Skipping.")
-                    yield json.dumps({"type": "error", "detail": f"Rubric question not found for question number '{qnum_str}' in notebook '{notebook_id}'."}) + "\n"
-                    return
+                    raise HTTPException(status_code=404, detail=f"Rubric question not found for question number '{qnum_str}' in notebook '{notebook_id}'.")
 
-                num_questions += 1
-                # Retrieve relevant course material for this question
+                # RAG retrieval + scoring run concurrently across questions
                 rag_material = await retrieve_context(course_handle, rubric_question)
                 marks, response_text = await score_question(
                     rubric_question, str(student_answer_str), str(rubric_answer_str),
                     runner, config.instructor_session_service, user_gmail,
                     course_material=rag_material
                 )
+                logging.info(f"Graded Q{qnum_str}: {marks} marks")
+                return qnum_str, marks, response_text
+
+            # Launch all questions concurrently using asyncio.gather
+            tasks = [
+                _grade_one(qnum_str, student_answer)
+                for qnum_str, student_answer in query_body.answers.items()
+            ]
+            # as_completed lets us stream progress as each question finishes
+            graded = {}
+            total_marks = 0.0
+            num_questions = len(tasks)
+            for coro in asyncio.as_completed(tasks):
+                qnum_str, marks, response_text = await coro
                 total_marks += marks
                 graded[qnum_str] = {'marks': marks, 'response': response_text}
-                logging.info(f"Graded Q{qnum_str}: {marks} marks")
-
                 yield json.dumps({"type": "progress", "message": f"Done evaluating question {qnum_str}"}) + "\n"
 
             logging.info(f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions.")
