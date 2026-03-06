@@ -403,7 +403,7 @@ async def update_marks(db, course_id, student_id, notebook_id, total_marks, max_
         if not student_doc.exists:
             logging.error(f"Student '{student_id}' not in course {course_id}.")
             raise StudentNotEnrolledError(student_id, course_id)
-        notebook_ref = student_ref.collection(u'notebooks').document(notebook_id)
+        notebook_ref = student_ref.collection(u'Notebooks').document(notebook_id)
         notebook_doc = await notebook_ref.get()
         if not notebook_doc.exists:
             logging.error(f"Notebook with ID '{notebook_id}' not found for student '{student_id}' in course '{course_id}'.")
