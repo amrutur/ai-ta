@@ -295,20 +295,30 @@ instructor_session_service = FirestoreSessionService(
     db=db,
     collection="instructor_sessions",
 )
-# Create runners — one per agent, since Runner.run_async() does not
-# support overriding the agent at call time.
-runner_instructor = Runner(
-    app_name="ai_ta",
-    agent=agent.instructor_assist_agent,
-    session_service=instructor_session_service
-)
-runner_student = Runner(
-    app_name="ai_ta",
-    agent=agent.student_assist_agent,
-    session_service=student_session_service
-)
-runner_scoring = Runner(
-    app_name="ai_ta",
-    agent=agent.scoring_assist_agent,
-    session_service=instructor_session_service
-)   
+# --- Runner Factory ---
+# Maps agent_type to its session service.
+_SESSION_SERVICES = {
+    "instructor": instructor_session_service,
+    "student": student_session_service,
+    "scoring": instructor_session_service,
+}
+
+_runner_cache = {}
+
+def get_runner(agent_type: str, model: str = agent.DEFAULT_MODEL) -> Runner:
+    """Get or create a Runner for the given agent type and model (cached)."""
+    key = (agent_type, model)
+    if key not in _runner_cache:
+        session_svc = _SESSION_SERVICES.get(agent_type)
+        if not session_svc:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+        ag = agent.create_agent(agent_type, model)
+        _runner_cache[key] = Runner(
+            app_name="ai_ta", agent=ag, session_service=session_svc
+        )
+    return _runner_cache[key]
+
+# Pre-populate cache with default runners for backward compatibility
+runner_instructor = get_runner("instructor")
+runner_student = get_runner("student")
+runner_scoring = get_runner("scoring")

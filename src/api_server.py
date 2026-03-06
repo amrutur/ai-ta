@@ -46,7 +46,7 @@ from google_auth_oauthlib.flow import Flow
 from google.genai import types
 
 import config
-from agent_service import run_agent_and_get_response, score_question, evaluate
+from agent_service import run_agent_and_get_response, score_question, evaluate, update_semaphore_limit, get_semaphore_limit
 
 from models import (
     QueryRequest, QueryResponse,
@@ -59,7 +59,9 @@ from models import (
     CreateCourseRequest, CreateCourseResponse,
     FetchMarksListRequest, FetchMarksListResponse,
     AddRubricRequest, AddRubricResponse,
-    BuildCourseIndexRequest, BuildCourseIndexResponse
+    BuildCourseIndexRequest, BuildCourseIndexResponse,
+    UpdateCourseConfigRequest, UpdateCourseConfigResponse,
+    UpdateGlobalConfigRequest, UpdateGlobalConfigResponse
 )
 from auth import (
     create_jwt_token,
@@ -148,6 +150,7 @@ async def load_courses_cache():
             courses[course_handle] = course_data
             courses[course_handle].setdefault('isactive_tutor', True)
             courses[course_handle].setdefault('isactive_eval', False)
+            # model defaults to None (uses agent.DEFAULT_MODEL via the runner factory)
             # Load rubric notebooks for this course into the cache
             notebooks = await load_notebooks_from_db(config.db, course_handle)
             for notebook_id, notebook_data in notebooks.items():
@@ -567,7 +570,8 @@ async def assist(query_body: AssistRequest, request: Request):
                     parts.append(types.Part.from_text(text="{The instructor's answer is} " + str(answer)))
                 if output:
                     parts.append(types.Part.from_text(text="{The instructor's code output is} " + json.dumps(output)))
-                runner = config.runner_instructor
+                course_model = courses[course_handle].get('model')
+                runner = config.get_runner("instructor", course_model) if course_model else config.runner_instructor
             else:
                 # Student path — use cached rubric data without revealing the answer
                 if notebook_id not in courses[course_handle]:
@@ -593,7 +597,8 @@ async def assist(query_body: AssistRequest, request: Request):
                     parts.append(types.Part.from_text(text="{The rubric is} " + str(rubric_answer)))
                 if rubric_output is not None:
                     parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
-                runner = config.runner_student
+                course_model = courses[course_handle].get('model')
+                runner = config.get_runner("student", course_model) if course_model else config.runner_student
 
             # Prepend RAG material if available
             if rag_material:
@@ -628,7 +633,9 @@ async def assist(query_body: AssistRequest, request: Request):
 async def grade(query_body: GradeRequest, request: Request):
 
     '''Grade a single question-answer'''
-    runner = config.runner_scoring
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+    course_model = courses[course_handle].get('model') if course_handle in courses else None
+    runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
 
     if ('user' in request.session) : #user is logged and authenticated
         user_id = request.session['user']['id']
@@ -684,7 +691,8 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     if not courses[course_handle].get('isactive_eval', False):
         raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive for this course.")
 
-    runner = config.runner_scoring
+    course_model = courses[course_handle].get('model')
+    runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
     notebook_id = query_body.notebook_id
 
     async def _generate():
@@ -956,6 +964,83 @@ async def enable_eval(
         return {"message": "Eval API has been enabled successfully"}
     except Exception as e:
         logging.error("An exception occurred during enable_eval: %s", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+@app.post("/update_course_config", response_model=UpdateCourseConfigResponse)
+async def update_course_config(
+    query_body: UpdateCourseConfigRequest,
+    request: Request
+):
+    '''Update per-course configuration (model, isactive_eval, isactive_tutor).
+    Only accessible to instructors or platform admins.'''
+    user = get_current_user(request)
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    user_gmail = user.get('email', '').lower()
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+
+    updated = {}
+    try:
+        if query_body.model is not None:
+            courses[course_handle]['model'] = query_body.model
+            await update_course_info(config.db, course_handle, 'model', query_body.model)
+            updated['model'] = query_body.model
+
+        if query_body.isactive_eval is not None:
+            courses[course_handle]['isactive_eval'] = query_body.isactive_eval
+            await update_course_info(config.db, course_handle, 'isactive_eval', query_body.isactive_eval)
+            updated['isactive_eval'] = query_body.isactive_eval
+
+        if query_body.isactive_tutor is not None:
+            courses[course_handle]['isactive_tutor'] = query_body.isactive_tutor
+            await update_course_info(config.db, course_handle, 'isactive_tutor', query_body.isactive_tutor)
+            updated['isactive_tutor'] = query_body.isactive_tutor
+
+        if not updated:
+            raise HTTPException(status_code=400, detail="No configuration fields provided to update.")
+
+        logging.info(f"User {user_gmail} updated course config for '{course_handle}': {updated}")
+        return UpdateCourseConfigResponse(updated=updated)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error("Error updating course config: %s", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+@app.post("/update_global_config", response_model=UpdateGlobalConfigResponse)
+async def update_global_config(
+    query_body: UpdateGlobalConfigRequest,
+    request: Request
+):
+    '''Update global server configuration (semaphore_limit).
+    Only accessible to platform admins.'''
+    user = get_admin_user(request)
+
+    updated = {}
+    try:
+        if query_body.semaphore_limit is not None:
+            update_semaphore_limit(query_body.semaphore_limit)
+            updated['semaphore_limit'] = query_body.semaphore_limit
+
+        if not updated:
+            raise HTTPException(status_code=400, detail="No configuration fields provided to update.")
+
+        logging.info(f"Admin {user.get('email')} updated global config: {updated}")
+        return UpdateGlobalConfigResponse(updated=updated)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error("Error updating global config: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 

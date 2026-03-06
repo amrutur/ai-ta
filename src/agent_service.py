@@ -19,7 +19,24 @@ from firestore_service import FirestoreSessionService
 from google.genai import types
 
 # Limit concurrent Gemini API calls to avoid rate-limit errors
-_gemini_semaphore = asyncio.Semaphore(5)
+DEFAULT_SEMAPHORE_LIMIT = 5
+_gemini_semaphore = asyncio.Semaphore(DEFAULT_SEMAPHORE_LIMIT)
+_semaphore_limit = DEFAULT_SEMAPHORE_LIMIT
+
+def get_semaphore_limit() -> int:
+    """Return the current semaphore limit."""
+    return _semaphore_limit
+
+def update_semaphore_limit(new_limit: int):
+    """Replace the global semaphore with a new limit.
+
+    In-flight requests on the old semaphore finish naturally;
+    new requests use the new one.
+    """
+    global _gemini_semaphore, _semaphore_limit
+    _semaphore_limit = new_limit
+    _gemini_semaphore = asyncio.Semaphore(new_limit)
+    logging.info(f"Gemini API semaphore limit updated to {new_limit}")
 
 async def run_agent_and_get_response(current_session_id: str, user_id: str, content: types.Content, runner: Runner) -> str:
     """Helper to run the agent and aggregate the response text from the stream."""

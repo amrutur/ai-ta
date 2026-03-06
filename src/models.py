@@ -3,8 +3,8 @@ Pydantic request/response models for the API endpoints.
 """
 
 from datetime import datetime
-from pydantic import BaseModel, AnyUrl, EmailStr
-from typing import Dict, Any, List
+from pydantic import BaseModel, AnyUrl, EmailStr, field_validator
+from typing import Dict, Any, List, Optional
 
 
 class QueryRequest(BaseModel):
@@ -157,4 +157,28 @@ class BuildCourseIndexResponse(BaseModel):
     files_processed: int
     chunks_created: int
     message: str | None = None
+
+class UpdateCourseConfigRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    model: Optional[str] = None
+    isactive_eval: Optional[bool] = None
+    isactive_tutor: Optional[bool] = None
+
+class UpdateCourseConfigResponse(BaseModel):
+    updated: Dict[str, Any]
+
+class UpdateGlobalConfigRequest(BaseModel):
+    semaphore_limit: Optional[int] = None
+
+    @field_validator('semaphore_limit')
+    @classmethod
+    def validate_semaphore_limit(cls, v):
+        if v is not None and (v < 1 or v > 100):
+            raise ValueError('semaphore_limit must be between 1 and 100')
+        return v
+
+class UpdateGlobalConfigResponse(BaseModel):
+    updated: Dict[str, Any]
 
