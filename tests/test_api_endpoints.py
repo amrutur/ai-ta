@@ -192,6 +192,7 @@ class TestEvalEndpoint:
             with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
                 with patch("api_server.add_student_if_not_exists", new_callable=AsyncMock):
                     with patch("api_server.add_student_notebook_if_not_exists", new_callable=AsyncMock):
+                      with patch("api_server.save_student_answers", new_callable=AsyncMock):
                         with patch("api_server.update_marks", new_callable=AsyncMock):
                             resp = client.post(
                                 "/eval",
@@ -214,8 +215,9 @@ class TestEvalEndpoint:
         # Should have a progress message and a final response
         progress_msgs = [l for l in lines if l["type"] == "progress"]
         response_msgs = [l for l in lines if l["type"] == "response"]
-        assert len(progress_msgs) >= 1
-        assert "Done evaluating question 1" in progress_msgs[0]["message"]
+        assert len(progress_msgs) >= 2
+        assert "saved in the server" in progress_msgs[0]["message"]
+        assert "Done evaluating question 1" in progress_msgs[1]["message"]
         assert len(response_msgs) == 1
         assert "10.0" in response_msgs[0]["response"]
 

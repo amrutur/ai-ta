@@ -390,6 +390,20 @@ async def upload_student_notebook(db, course_handle, student_id, student_name, n
         logging.error(f"Error in upload_student_notebook: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error while adding answer notebook.")
 
+async def save_student_answers(db, course_handle, student_id, notebook_id, answers):
+    '''Save the student's answers to their notebook document.
+
+    Path: courses/{course_handle}/Students/{student_id}/Notebooks/{notebook_id}
+    '''
+    try:
+        notebook_ref = (db.collection(u'courses').document(course_handle)
+                        .collection(u'Students').document(student_id)
+                        .collection(u'Notebooks').document(notebook_id))
+        await notebook_ref.update({u'answers': answers})
+    except Exception as e:
+        logging.error(f"Error saving student answers for {student_id}/{notebook_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save student answers.")
+
 async def update_marks(db, course_id, student_id, notebook_id, total_marks, max_marks, grader_response):
     '''Update the marks for the answer notebook of student_id in the database.'''
     try:

@@ -76,6 +76,7 @@ from database import (
     upload_student_notebook,
     update_course_info,
     update_marks,
+    save_student_answers,
     fetch_grader_response,
     create_course,
     make_course_handle,
@@ -718,10 +719,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
             )
 
             # Store student answers in the notebook document
-            notebook_ref = (config.db.collection(u'courses').document(course_handle)
-                            .collection(u'Students').document(user_gmail)
-                            .collection(u'Notebooks').document(notebook_id))
-            await notebook_ref.update({u'answers': query_body.answers})
+            await save_student_answers(config.db, course_handle, user_gmail, notebook_id, query_body.answers)
 
             yield json.dumps({"type": "progress", "message": "Your notebook has been saved in the server and has also been queued for evaluation. Once the evaluation is complete, the graded notebook will be sent via email."}) + "\n"
 
