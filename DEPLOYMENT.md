@@ -266,7 +266,7 @@ docker run -p 8080:8080 \
 - [ ] Service account permissions reviewed
 - [ ] Cloud Run service configured with appropriate memory/CPU limits
 - [ ] Firestore security rules configured
-- [ ] API rate limiting considered
+- [ ] Per-student rate limiting configured for each course (via `/update_course_config`)
 
 ## Cost Optimization
 

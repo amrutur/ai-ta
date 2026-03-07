@@ -40,6 +40,7 @@ firestore/
 │       ├── start_date, end_date, created_at, last_updated
 │       ├── folder_name (GCS path)
 │       ├── isactive_tutor, isactive_eval (feature flags)
+│       ├── student_rate_limit, student_rate_limit_window (per-student rate limiting)
 │       │
 │       ├── Notebooks/ (subcollection — rubrics & instructor content)
 │       │   └── {notebook_id}/
@@ -77,6 +78,7 @@ firestore/
 - **Course Materials Upload**: Drag-and-drop browser interface for uploading PDFs to GCS
 - **RAG Index Building**: Build vector search indices over uploaded course materials
 - **Tutor & Eval Controls**: Dynamically enable/disable the tutoring and evaluation endpoints per course
+- **Per-Student Rate Limiting**: Configurable sliding-window rate limits per course to manage AI model usage
 - **Batch Grading**: Evaluate multiple student submissions
 - **Email Notifications**: Notify students when grades are ready via SendGrid
 - **Grade Management**: View student marks lists and detailed grading feedback
@@ -90,6 +92,7 @@ firestore/
 - **RAG Pipeline**: Retrieval-Augmented Generation using Vertex AI embeddings (`text-embedding-004`) and Firestore vector search for grounding responses in course materials
 - **Custom Firestore Session Service**: Async session persistence with app-level and user-level state, event subcollections
 - **Dual Authentication**: OAuth 2.0 sessions (browser) and JWT tokens (API/Colab clients)
+- **Per-Student Rate Limiting**: In-memory sliding-window rate limiter configurable per course, with instructor bypass and live config updates
 - **GCS Signed URL Uploads**: Direct browser-to-GCS uploads via signed URLs (bypasses Cloud Run size limits)
 - **SendGrid Integration**: Email delivery for grade notifications
 - **Cloud Run Deployment**: Scalable, serverless deployment on Google Cloud
@@ -230,14 +233,31 @@ Students install the client package in their Colab notebooks:
    POST /enable_eval    — allow students to submit for grading via /eval
    ```
 
-6. **View student grades**
+6. **Configure per-student rate limiting** (optional)
+
+   Limit how many AI requests each student can make per time window:
+   ```
+   POST /update_course_config
+   {
+     "institution_id": "...", "term_id": "...", "course_id": "...",
+     "student_rate_limit": 20,
+     "student_rate_limit_window": 3600
+   }
+   ```
+   - `student_rate_limit`: Max AI requests per student per window (set to `0` to disable)
+   - `student_rate_limit_window`: Window size in seconds (60–86400, default: 3600)
+   - Instructors and admins are not affected by rate limits
+   - One `/eval` submission counts as one request regardless of question count
+   - Monitor usage with `POST /rate_limit_status`
+
+7. **View student grades**
    ```python
    # In a Colab notebook with instructor credentials
    import colab_grading_client as cgc
    grades = cgc.fetch_marks_list(...)
    ```
 
-7. **Send grade notifications**
+8. **Send grade notifications**
    ```python
    cgc.notify_student_grades(...)
    ```
@@ -286,12 +306,15 @@ The API supports two authentication methods:
 | `/validate_course_access` | GET | Query params | Validate instructor access to a course |
 | `/get_upload_url` | POST | JSON body | Generate signed GCS URL for direct browser upload |
 | `/build_course_index` | POST | `BuildCourseIndexRequest` | Build RAG vector index for course PDF materials |
+| `/update_course_config` | POST | `UpdateCourseConfigRequest` | Update course config (model, tutor/eval toggle, rate limits) |
+| `/rate_limit_status` | POST | `TutorInteractionRequest` | View per-student rate limit usage for a course |
 
 ### Admin Endpoints (Requires Admin Authentication)
 
 | Endpoint | Method | Request Model | Description |
 |----------|--------|---------------|-------------|
 | `/create_course` | POST | `CreateCourseRequest` | Create a new course on the platform |
+| `/update_global_config` | POST | `UpdateGlobalConfigRequest` | Update global server config (e.g., concurrency semaphore limit) |
 
 ### Diagnostics
 
@@ -392,6 +415,7 @@ ai-ta/
 │   ├── firestore_service.py # Custom async Firestore session service for ADK
 │   ├── agent.py             # AI agent definitions (instructor, tutor, scoring)
 │   ├── agent_service.py     # Agent orchestration and scoring logic
+│   ├── rate_limiter.py       # Per-student sliding-window rate limiter
 │   ├── rag.py               # RAG pipeline (PDF chunking, embedding, retrieval)
 │   ├── drive_utils.py       # Google Drive / Colab notebook utilities
 │   ├── storage_utils.py     # GCS upload and signed URL utilities
@@ -403,7 +427,8 @@ ai-ta/
 │   ├── test_database.py
 │   ├── test_agent_service.py
 │   ├── test_models.py
-│   └── test_rag.py
+│   ├── test_rag.py
+│   └── test_rate_limiter.py
 ├── requirements.txt
 ├── Dockerfile
 ├── Makefile
