@@ -90,8 +90,11 @@ from drive_utils import load_notebook_from_google_drive_sa
 from email_service import send_email
 from storage_utils import upload_blob, generate_signed_upload_url
 from rag import build_course_index, retrieve_context
+from rate_limiter import student_rate_limiter
 import datetime
 from collections import defaultdict
+
+DEFAULT_RATE_LIMIT_WINDOW = 3600  # 1 hour
 
 # --- FastAPI Application ---
 app = FastAPI(title="AI-TA Agent API")
@@ -151,6 +154,8 @@ async def load_courses_cache():
             courses[course_handle] = course_data
             courses[course_handle].setdefault('isactive_tutor', True)
             courses[course_handle].setdefault('isactive_eval', False)
+            courses[course_handle].setdefault('student_rate_limit', None)
+            courses[course_handle].setdefault('student_rate_limit_window', None)
             # model defaults to None (uses agent.DEFAULT_MODEL via the runner factory)
             # Load rubric notebooks for this course into the cache
             notebooks = await load_notebooks_from_db(config.db, course_handle)
@@ -494,6 +499,10 @@ async def assist(query_body: AssistRequest, request: Request):
     if not is_instructor and not courses[course_handle].get('isactive_tutor', False):
         raise HTTPException(status_code=503, detail="Tutor is temporarily disabled")
 
+    # Per-student rate limit (skipped for instructors)
+    if not is_instructor:
+        check_student_rate_limit(user_gmail, course_handle)
+
     async def _generate():
         """Async generator that yields newline-delimited JSON progress/response lines."""
         try:
@@ -640,8 +649,14 @@ async def grade(query_body: GradeRequest, request: Request):
 
     if ('user' in request.session) : #user is logged and authenticated
         user_id = request.session['user']['id']
+        user_email = request.session['user'].get('email')
     else:
         user_id = query_body.student_id
+        user_email = None
+
+    # Per-student rate limit (only for authenticated non-instructors)
+    if user_email and not is_authorized(user_email, course_handle):
+        check_student_rate_limit(user_email, course_handle)
 
     try:
         if not query_body.question:
@@ -691,6 +706,10 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     # Check if eval API is enabled for this course
     if not courses[course_handle].get('isactive_eval', False):
         raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive for this course.")
+
+    # Per-student rate limit (skipped for instructors)
+    if not is_authorized(user_gmail, course_handle):
+        check_student_rate_limit(user_gmail, course_handle)
 
     course_model = courses[course_handle].get('model')
     runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
@@ -857,6 +876,24 @@ def is_authorized(user_gmail: str, course_handle: str) -> bool:
 
     return False
 
+
+def check_student_rate_limit(user_email: str, course_handle: str) -> None:
+    """Raise HTTP 429 if the student has exceeded their rate limit for this course."""
+    course_data = courses.get(course_handle, {})
+    max_requests = course_data.get('student_rate_limit')
+    if max_requests is None:
+        return  # Rate limiting not configured
+
+    window = course_data.get('student_rate_limit_window') or DEFAULT_RATE_LIMIT_WINDOW
+
+    if not student_rate_limiter.check_and_record(course_handle, user_email, max_requests, window):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. You are allowed {max_requests} AI requests "
+                   f"per {window // 60} minute(s) for this course. Please try again later."
+        )
+
+
 @app.post("/disable_tutor")
 async def disable_tutor(
     query_body: TutorInteractionRequest,
@@ -971,7 +1008,7 @@ async def update_course_config(
     query_body: UpdateCourseConfigRequest,
     request: Request
 ):
-    '''Update per-course configuration (model, isactive_eval, isactive_tutor).
+    '''Update per-course configuration (model, isactive_eval, isactive_tutor, student_rate_limit, student_rate_limit_window).
     Only accessible to instructors or platform admins.'''
     user = get_current_user(request)
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
@@ -1000,6 +1037,20 @@ async def update_course_config(
             await update_course_info(config.db, course_handle, 'isactive_tutor', query_body.isactive_tutor)
             updated['isactive_tutor'] = query_body.isactive_tutor
 
+        if query_body.student_rate_limit is not None:
+            # 0 means disabled (store as None)
+            val = query_body.student_rate_limit if query_body.student_rate_limit > 0 else None
+            courses[course_handle]['student_rate_limit'] = val
+            await update_course_info(config.db, course_handle, 'student_rate_limit', val)
+            updated['student_rate_limit'] = val
+            student_rate_limiter.clear_course(course_handle)
+
+        if query_body.student_rate_limit_window is not None:
+            courses[course_handle]['student_rate_limit_window'] = query_body.student_rate_limit_window
+            await update_course_info(config.db, course_handle, 'student_rate_limit_window', query_body.student_rate_limit_window)
+            updated['student_rate_limit_window'] = query_body.student_rate_limit_window
+            student_rate_limiter.clear_course(course_handle)
+
         if not updated:
             raise HTTPException(status_code=400, detail="No configuration fields provided to update.")
 
@@ -1012,6 +1063,32 @@ async def update_course_config(
         logging.error("Error updating course config: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+@app.post("/rate_limit_status")
+async def rate_limit_status(query_body: TutorInteractionRequest, request: Request):
+    '''Get per-student rate limit usage for a course. Instructor-only.'''
+    user = get_current_user(request)
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    user_gmail = user.get('email', '').lower()
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Instructor access required")
+
+    course_data = courses.get(course_handle, {})
+    max_req = course_data.get('student_rate_limit')
+    window = course_data.get('student_rate_limit_window') or DEFAULT_RATE_LIMIT_WINDOW
+
+    if max_req is None:
+        return {"rate_limiting": "disabled", "course": course_handle}
+
+    usage = student_rate_limiter.get_course_usage(course_handle, max_req, window)
+    return {
+        "rate_limiting": "enabled",
+        "max_requests": max_req,
+        "window_seconds": window,
+        "students": usage,
+    }
 
 
 @app.post("/update_global_config", response_model=UpdateGlobalConfigResponse)

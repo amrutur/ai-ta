@@ -165,6 +165,24 @@ class UpdateCourseConfigRequest(BaseModel):
     model: Optional[str] = None
     isactive_eval: Optional[bool] = None
     isactive_tutor: Optional[bool] = None
+    student_rate_limit: Optional[int] = None
+    student_rate_limit_window: Optional[int] = None
+
+    @field_validator('student_rate_limit')
+    @classmethod
+    def validate_student_rate_limit(cls, v):
+        if v is not None and v < 0:
+            raise ValueError('student_rate_limit must be >= 0 (0 to disable)')
+        if v is not None and v > 1000:
+            raise ValueError('student_rate_limit must be <= 1000')
+        return v
+
+    @field_validator('student_rate_limit_window')
+    @classmethod
+    def validate_student_rate_limit_window(cls, v):
+        if v is not None and (v < 60 or v > 86400):
+            raise ValueError('student_rate_limit_window must be between 60 and 86400 seconds')
+        return v
 
 class UpdateCourseConfigResponse(BaseModel):
     updated: Dict[str, Any]
