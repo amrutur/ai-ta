@@ -620,8 +620,15 @@ async def assist(query_body: AssistRequest, request: Request):
 
             yield json.dumps({"type": "progress", "message": "Formed the prompt and asking the Tutor now..."}) + "\n"
 
-            # --- Call the agent ---
-            response_text = await run_agent_and_get_response(session_id, user_gmail, content, runner)
+            # --- Call the agent with heartbeat to prevent client read-timeout ---
+            agent_task = asyncio.create_task(
+                run_agent_and_get_response(session_id, user_gmail, content, runner)
+            )
+            while not agent_task.done():
+                done, _ = await asyncio.wait({agent_task}, timeout=15)
+                if not done:
+                    yield json.dumps({"type": "heartbeat"}) + "\n"
+            response_text = agent_task.result()
 
             if not response_text:
                 yield json.dumps({"type": "error", "detail": "Failed to generate response"}) + "\n"
@@ -778,20 +785,26 @@ async def eval_submission(query_body: EvalRequest, request: Request):
                 logging.info(f"Graded Q{qnum_str}: {marks} marks")
                 return qnum_str, marks, response_text
 
-            # Launch all questions concurrently using asyncio.gather
+            # Launch all questions concurrently as tasks
             tasks = [
-                _grade_one(qnum_str, student_answer)
+                asyncio.create_task(_grade_one(qnum_str, student_answer))
                 for qnum_str, student_answer in query_body.answers.items()
             ]
-            # as_completed lets us stream progress as each question finishes
             graded = {}
             total_marks = 0.0
             num_questions = len(tasks)
-            for coro in asyncio.as_completed(tasks):
-                qnum_str, marks, response_text = await coro
-                total_marks += marks
-                graded[qnum_str] = {'marks': marks, 'response': response_text}
-                yield json.dumps({"type": "progress", "message": f"Done evaluating question {qnum_str}"}) + "\n"
+            pending_tasks = set(tasks)
+            while pending_tasks:
+                # Wait up to 15s for any task to complete; send heartbeat if none do
+                done, pending_tasks = await asyncio.wait(pending_tasks, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    yield json.dumps({"type": "heartbeat"}) + "\n"
+                    continue
+                for finished in done:
+                    qnum_str, marks, response_text = finished.result()
+                    total_marks += marks
+                    graded[qnum_str] = {'marks': marks, 'response': response_text}
+                    yield json.dumps({"type": "progress", "message": f"Done evaluating question {qnum_str}"}) + "\n"
 
             logging.info(f"{user_name}: Evaluation completed. Total Marks: {total_marks}/{max_marks_total} for {num_questions} questions.")
 
