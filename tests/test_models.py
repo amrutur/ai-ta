@@ -31,6 +31,7 @@ from models import (
     TutorInteractionResponse,
     AddRubricRequest,
     AddRubricResponse,
+    UpdateCourseConfigRequest,
 )
 
 
@@ -201,3 +202,72 @@ class TestOtherModels:
             course_id="6.001", term_id="2025", institution_id="mit",
         )
         assert req.course_id == "6.001"
+
+
+# ---------------------------------------------------------------------------
+# UpdateCourseConfigRequest — rate limit fields
+# ---------------------------------------------------------------------------
+
+class TestUpdateCourseConfigRequest:
+    def test_valid_with_rate_limit_fields(self):
+        req = UpdateCourseConfigRequest(
+            institution_id="mit", term_id="2025", course_id="6.001",
+            student_rate_limit=20,
+            student_rate_limit_window=3600,
+        )
+        assert req.student_rate_limit == 20
+        assert req.student_rate_limit_window == 3600
+
+    def test_rate_limit_fields_optional(self):
+        req = UpdateCourseConfigRequest(
+            institution_id="mit", term_id="2025", course_id="6.001",
+        )
+        assert req.student_rate_limit is None
+        assert req.student_rate_limit_window is None
+
+    def test_rate_limit_zero_disables(self):
+        req = UpdateCourseConfigRequest(
+            institution_id="mit", term_id="2025", course_id="6.001",
+            student_rate_limit=0,
+        )
+        assert req.student_rate_limit == 0
+
+    def test_rate_limit_negative_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateCourseConfigRequest(
+                institution_id="mit", term_id="2025", course_id="6.001",
+                student_rate_limit=-1,
+            )
+
+    def test_rate_limit_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateCourseConfigRequest(
+                institution_id="mit", term_id="2025", course_id="6.001",
+                student_rate_limit=1001,
+            )
+
+    def test_window_below_min_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateCourseConfigRequest(
+                institution_id="mit", term_id="2025", course_id="6.001",
+                student_rate_limit_window=30,
+            )
+
+    def test_window_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateCourseConfigRequest(
+                institution_id="mit", term_id="2025", course_id="6.001",
+                student_rate_limit_window=100000,
+            )
+
+    def test_window_boundary_values(self):
+        req_min = UpdateCourseConfigRequest(
+            institution_id="mit", term_id="2025", course_id="6.001",
+            student_rate_limit_window=60,
+        )
+        assert req_min.student_rate_limit_window == 60
+        req_max = UpdateCourseConfigRequest(
+            institution_id="mit", term_id="2025", course_id="6.001",
+            student_rate_limit_window=86400,
+        )
+        assert req_max.student_rate_limit_window == 86400

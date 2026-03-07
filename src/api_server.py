@@ -652,7 +652,12 @@ async def grade(query_body: GradeRequest, request: Request):
         user_email = request.session['user'].get('email')
     else:
         user_id = query_body.student_id
-        user_email = None
+        # Try to get email from JWT token for rate limiting
+        try:
+            jwt_user = get_current_user(request)
+            user_email = jwt_user.get('email')
+        except Exception:
+            user_email = None
 
     # Per-student rate limit (only for authenticated non-instructors)
     if user_email and not is_authorized(user_email, course_handle):

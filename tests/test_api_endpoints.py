@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from starlette.testclient import TestClient
+from rate_limiter import student_rate_limiter
 
 
 # ---------------------------------------------------------------------------
@@ -448,3 +449,350 @@ class TestUploadCourseMaterialsEndpoint:
             assert "failed" in resp.json()["detail"].lower()
         finally:
             self._cleanup_course(course_handle)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting tests
+# ---------------------------------------------------------------------------
+
+class TestRateLimiting:
+
+    def _setup_course(self, rate_limit=None, window=None,
+                      instructor_email="instructor@test.com"):
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+        courses[course_handle] = {
+            "instructor_gmail": instructor_email,
+            "isactive_tutor": True,
+            "isactive_eval": True,
+            "student_rate_limit": rate_limit,
+            "student_rate_limit_window": window,
+        }
+        return course_handle
+
+    def _cleanup(self, course_handle):
+        from api_server import courses
+        if course_handle in courses:
+            del courses[course_handle]
+        student_rate_limiter.clear_course(course_handle)
+
+    def test_assist_blocked_when_rate_limit_exceeded(self, client):
+        """Student should get 429 after exceeding the rate limit on /assist."""
+        course_handle = self._setup_course(rate_limit=2, window=3600)
+        try:
+            # Use up the quota
+            for _ in range(2):
+                student_rate_limiter.check_and_record(
+                    course_handle, "student@test.com", 2, 3600
+                )
+            resp = client.post(
+                "/assist",
+                json={
+                    "qnum": 1, "context": "ctx",
+                    "question": {"question": "Q"},
+                    "answer": [{"percent": 100, "component": "A"}],
+                    "output": {}, "ta_chat": "help",
+                    "notebook_id": "hw1",
+                    "institution_id": "mit", "term_id": "2025",
+                    "course_id": "6.001",
+                },
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 429
+            assert "Rate limit exceeded" in resp.json()["detail"]
+        finally:
+            self._cleanup(course_handle)
+
+    def test_assist_allowed_when_no_rate_limit(self, client):
+        """Without a rate limit configured, students should not be blocked."""
+        course_handle = self._setup_course(rate_limit=None)
+        try:
+            with patch("api_server.run_agent_and_get_response", new_callable=AsyncMock, return_value="response"):
+                with patch("api_server.add_student_notebook_if_not_exists", new_callable=AsyncMock):
+                    with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
+                        # Should not return 429
+                        resp = client.post(
+                            "/assist",
+                            json={
+                                "qnum": 1, "context": "ctx",
+                                "question": {"question": "Q"},
+                                "answer": [{"percent": 100, "component": "A"}],
+                                "output": {}, "ta_chat": "help",
+                                "notebook_id": "hw1",
+                                "institution_id": "mit", "term_id": "2025",
+                                "course_id": "6.001",
+                            },
+                            headers=_auth_header(email="student@test.com"),
+                        )
+            assert resp.status_code != 429
+        finally:
+            self._cleanup(course_handle)
+
+    def test_instructor_bypasses_rate_limit(self, client):
+        """Instructors should not be affected by the rate limit."""
+        course_handle = self._setup_course(rate_limit=1, window=3600)
+        try:
+            # Use up the quota for the instructor email
+            student_rate_limiter.check_and_record(
+                course_handle, "instructor@test.com", 1, 3600
+            )
+            with patch("api_server.run_agent_and_get_response", new_callable=AsyncMock, return_value="response"):
+                with patch("api_server.add_instructor_notebook_if_not_exists", new_callable=AsyncMock):
+                    with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
+                        resp = client.post(
+                            "/assist",
+                            json={
+                                "qnum": 1, "context": "ctx",
+                                "question": {"question": "Q"},
+                                "answer": [{"percent": 100, "component": "A"}],
+                                "output": {}, "ta_chat": "help",
+                                "notebook_id": "hw1",
+                                "institution_id": "mit", "term_id": "2025",
+                                "course_id": "6.001",
+                            },
+                            headers=_auth_header(email="instructor@test.com"),
+                        )
+            # Instructor should not get 429
+            assert resp.status_code != 429
+        finally:
+            self._cleanup(course_handle)
+
+    def test_grade_blocked_when_rate_limit_exceeded(self, client):
+        """Student should get 429 on /grade after exceeding rate limit."""
+        course_handle = self._setup_course(rate_limit=1, window=3600)
+        try:
+            student_rate_limiter.check_and_record(
+                course_handle, "student@test.com", 1, 3600
+            )
+            resp = client.post(
+                "/grade",
+                json={
+                    "question": "What is 2+2?", "answer": "4", "q_id": "q1",
+                    "notebook_id": "hw1", "rubric": "answer is 4",
+                    "student_id": "s1", "course_id": "6.001",
+                    "term_id": "2025", "institution_id": "mit",
+                },
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 429
+        finally:
+            self._cleanup(course_handle)
+
+    def test_eval_blocked_when_rate_limit_exceeded(self, client):
+        """Student should get 429 on /eval after exceeding rate limit."""
+        course_handle = self._setup_course(rate_limit=1, window=3600)
+        try:
+            student_rate_limiter.check_and_record(
+                course_handle, "student@test.com", 1, 3600
+            )
+            resp = client.post(
+                "/eval",
+                json={
+                    "notebook_id": "hw1", "context": {}, "questions": {"1": "Q"},
+                    "answers": {"1": "A"}, "outputs": {"1": ""},
+                    "institution_id": "mit", "term_id": "2025",
+                    "course_id": "6.001",
+                },
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 429
+        finally:
+            self._cleanup(course_handle)
+
+
+# ---------------------------------------------------------------------------
+# /update_course_config — rate limit fields
+# ---------------------------------------------------------------------------
+
+class TestUpdateCourseConfigRateLimit:
+
+    def _setup_course(self, instructor_email="instructor@test.com"):
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+        courses[course_handle] = {
+            "instructor_gmail": instructor_email,
+            "isactive_tutor": True,
+            "isactive_eval": True,
+            "student_rate_limit": None,
+            "student_rate_limit_window": None,
+        }
+        return course_handle
+
+    def _cleanup(self, course_handle):
+        from api_server import courses
+        if course_handle in courses:
+            del courses[course_handle]
+        student_rate_limiter.clear_course(course_handle)
+
+    def test_set_rate_limit(self, client):
+        """Instructor can set student_rate_limit via /update_course_config."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.update_course_info", new_callable=AsyncMock):
+                resp = client.post(
+                    "/update_course_config",
+                    json={
+                        "institution_id": "mit", "term_id": "2025",
+                        "course_id": "6.001",
+                        "student_rate_limit": 20,
+                    },
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["updated"]["student_rate_limit"] == 20
+
+            from api_server import courses
+            assert courses[course_handle]["student_rate_limit"] == 20
+        finally:
+            self._cleanup(course_handle)
+
+    def test_set_rate_limit_window(self, client):
+        """Instructor can set student_rate_limit_window."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.update_course_info", new_callable=AsyncMock):
+                resp = client.post(
+                    "/update_course_config",
+                    json={
+                        "institution_id": "mit", "term_id": "2025",
+                        "course_id": "6.001",
+                        "student_rate_limit_window": 1800,
+                    },
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+            assert resp.status_code == 200
+            assert resp.json()["updated"]["student_rate_limit_window"] == 1800
+        finally:
+            self._cleanup(course_handle)
+
+    def test_disable_rate_limit_with_zero(self, client):
+        """Setting student_rate_limit to 0 should store None (disabled)."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.update_course_info", new_callable=AsyncMock):
+                resp = client.post(
+                    "/update_course_config",
+                    json={
+                        "institution_id": "mit", "term_id": "2025",
+                        "course_id": "6.001",
+                        "student_rate_limit": 0,
+                    },
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+            assert resp.status_code == 200
+            assert resp.json()["updated"]["student_rate_limit"] is None
+
+            from api_server import courses
+            assert courses[course_handle]["student_rate_limit"] is None
+        finally:
+            self._cleanup(course_handle)
+
+    def test_non_instructor_cannot_set_rate_limit(self, client):
+        """Non-instructor should get 403 on /update_course_config."""
+        course_handle = self._setup_course(instructor_email="real-instructor@test.com")
+        try:
+            resp = client.post(
+                "/update_course_config",
+                json={
+                    "institution_id": "mit", "term_id": "2025",
+                    "course_id": "6.001",
+                    "student_rate_limit": 10,
+                },
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 403
+        finally:
+            self._cleanup(course_handle)
+
+    def test_invalid_rate_limit_rejected(self, client):
+        """Negative rate limit should be rejected by model validation (422)."""
+        course_handle = self._setup_course()
+        try:
+            resp = client.post(
+                "/update_course_config",
+                json={
+                    "institution_id": "mit", "term_id": "2025",
+                    "course_id": "6.001",
+                    "student_rate_limit": -5,
+                },
+                headers=_auth_header(email="instructor@test.com"),
+            )
+            assert resp.status_code == 422
+        finally:
+            self._cleanup(course_handle)
+
+
+# ---------------------------------------------------------------------------
+# /rate_limit_status endpoint
+# ---------------------------------------------------------------------------
+
+class TestRateLimitStatusEndpoint:
+
+    def _setup_course(self, rate_limit=None, window=None,
+                      instructor_email="instructor@test.com"):
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+        courses[course_handle] = {
+            "instructor_gmail": instructor_email,
+            "student_rate_limit": rate_limit,
+            "student_rate_limit_window": window,
+        }
+        return course_handle
+
+    def _cleanup(self, course_handle):
+        from api_server import courses
+        if course_handle in courses:
+            del courses[course_handle]
+        student_rate_limiter.clear_course(course_handle)
+
+    def test_returns_disabled_when_no_limit(self, client):
+        course_handle = self._setup_course()
+        try:
+            resp = client.post(
+                "/rate_limit_status",
+                json={"institution_id": "mit", "term_id": "2025", "course_id": "6.001"},
+                headers=_auth_header(email="instructor@test.com"),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["rate_limiting"] == "disabled"
+        finally:
+            self._cleanup(course_handle)
+
+    def test_returns_usage_when_enabled(self, client):
+        course_handle = self._setup_course(rate_limit=10, window=3600)
+        try:
+            # Simulate some usage
+            student_rate_limiter.check_and_record(course_handle, "alice@test.com", 10, 3600)
+            student_rate_limiter.check_and_record(course_handle, "alice@test.com", 10, 3600)
+
+            resp = client.post(
+                "/rate_limit_status",
+                json={"institution_id": "mit", "term_id": "2025", "course_id": "6.001"},
+                headers=_auth_header(email="instructor@test.com"),
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["rate_limiting"] == "enabled"
+            assert data["max_requests"] == 10
+            assert data["students"]["alice@test.com"]["used"] == 2
+        finally:
+            self._cleanup(course_handle)
+
+    def test_non_instructor_rejected(self, client):
+        course_handle = self._setup_course(instructor_email="real-instructor@test.com")
+        try:
+            resp = client.post(
+                "/rate_limit_status",
+                json={"institution_id": "mit", "term_id": "2025", "course_id": "6.001"},
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 403
+        finally:
+            self._cleanup(course_handle)
