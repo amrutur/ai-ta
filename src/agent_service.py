@@ -38,24 +38,59 @@ def update_semaphore_limit(new_limit: int):
     _gemini_semaphore = asyncio.Semaphore(new_limit)
     logging.info(f"Gemini API semaphore limit updated to {new_limit}")
 
+_MAX_RETRIES = 4
+_BASE_DELAY = 2  # seconds
+
+
+def _is_resource_exhausted(exc: Exception) -> bool:
+    """Check if an exception is a 429 / RESOURCE_EXHAUSTED error."""
+    # google.api_core.exceptions.ResourceExhausted
+    cls_name = type(exc).__name__
+    if cls_name == "ResourceExhausted":
+        return True
+    msg = str(exc).lower()
+    return "429" in msg or "resource_exhausted" in msg or "resource exhausted" in msg
+
+
 async def run_agent_and_get_response(current_session_id: str, user_id: str, content: types.Content, runner: Runner) -> str:
-    """Helper to run the agent and aggregate the response text from the stream."""
+    """Helper to run the agent and aggregate the response text from the stream.
+
+    Retries up to _MAX_RETRIES times with exponential backoff on
+    429 / RESOURCE_EXHAUSTED errors from the Vertex AI backend.
+    """
     async with _gemini_semaphore:
-        response_stream = runner.run_async(
-            user_id=user_id,
-            session_id=current_session_id,
-            new_message=content,
-        )
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                response_stream = runner.run_async(
+                    user_id=user_id,
+                    session_id=current_session_id,
+                    new_message=content,
+                )
 
-        text = ""
-        async for event in response_stream:
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    text += part.text
-            if event.is_final_response():
-                break
+                text = ""
+                async for event in response_stream:
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            text += part.text
+                    if event.is_final_response():
+                        break
 
-        return text
+                return text
+            except Exception as exc:
+                if _is_resource_exhausted(exc) and attempt < _MAX_RETRIES:
+                    delay = _BASE_DELAY * (2 ** attempt)  # 2, 4, 8, 16s
+                    logging.warning(
+                        "429 RESOURCE_EXHAUSTED on attempt %d/%d for session %s. "
+                        "Retrying in %ds...",
+                        attempt + 1, _MAX_RETRIES + 1, current_session_id, delay,
+                    )
+                    last_exc = exc
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        # Should not reach here, but just in case
+        raise last_exc  # type: ignore[misc]
 
 
 async def score_question(question: str, answer: str, rubric: str, runner: Runner, session_service: FirestoreSessionService, user_id: str, course_material: str = "") -> tuple[float, str]:
