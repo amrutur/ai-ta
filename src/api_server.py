@@ -891,14 +891,18 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
             logging.error(f"No rubric question found for Q{qnum_str}. Skipping.")
             return qnum_str, 0.0, f"No rubric question found for Q{qnum_str}."
 
-        rag_material = await retrieve_context(course_handle, rubric_question)
-        marks, response_text = await score_question(
-            rubric_question, str(student_answer_str), str(rubric_answer_str),
-            runner, config.instructor_session_service, student_id,
-            course_material=rag_material
-        )
-        logging.info(f"Graded Q{qnum_str} for {student_id}: {marks} marks")
-        return qnum_str, marks, response_text
+        try:
+            rag_material = await retrieve_context(course_handle, rubric_question)
+            marks, response_text = await score_question(
+                rubric_question, str(student_answer_str), str(rubric_answer_str),
+                runner, config.instructor_session_service, student_id,
+                course_material=rag_material
+            )
+            logging.info(f"Graded Q{qnum_str} for {student_id}: {marks} marks")
+            return qnum_str, marks, response_text
+        except Exception as e:
+            logging.error(f"Error grading Q{qnum_str} for {student_id}: {e}")
+            return qnum_str, 0.0, f"Error grading question: {e}"
 
     async def _grade_one_student(student_id):
         """Grade all questions for a single student. Returns (student_id, total_marks, graded_dict) or None if skipped."""
@@ -914,10 +918,17 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
 
         graded = {}
         total_marks = 0.0
-        for finished in asyncio.as_completed(tasks):
-            qnum_str, marks, response_text = await finished
-            total_marks += marks
-            graded[qnum_str] = {'marks': marks, 'response': response_text}
+        try:
+            for finished in asyncio.as_completed(tasks):
+                qnum_str, marks, response_text = await finished
+                total_marks += marks
+                graded[qnum_str] = {'marks': marks, 'response': response_text}
+        except Exception:
+            # Cancel remaining tasks and suppress their exceptions
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         # Store marks in database
         await update_marks(config.db, course_handle, student_id, notebook_id, total_marks, max_marks_total, graded)
