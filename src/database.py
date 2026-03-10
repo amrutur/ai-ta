@@ -151,7 +151,15 @@ async def get_student_list(db, course_handle: str):
     return student_list
 
 async def get_marks_list(db, course_handle: str,  notebook_id: str):
-    '''Return the list of student marks for the course_id in the Firestore database.'''
+    '''Return the list of student marks for the course_id in the Firestore database.
+
+    Path: courses/{course_handle}/Students/{student_id}/Notebooks/{notebook_id}
+
+    Returns:
+        Tuple of (max_marks, marks_list) where marks_list is a list of dicts
+        with student_id and total_marks. total_marks is -1 if not graded yet,
+        or None if the notebook doesn't exist for that student.
+    '''
     try:
         courses_ref = db.collection(u'courses').document(course_handle)
         course_doc = await courses_ref.get()
@@ -159,20 +167,23 @@ async def get_marks_list(db, course_handle: str,  notebook_id: str):
             raise CourseNotFoundError(course_handle)
         students_ref = courses_ref.collection(u'Students')
         marks_list = []
+        max_marks = None
         async for doc in students_ref.select([]).stream():
-            notebook_ref = students_ref.document(doc.id).collection(u'notebooks')
+            student_id = doc.id
+            notebook_ref = students_ref.document(student_id).collection(u'Notebooks')
             notebook = await notebook_ref.document(notebook_id).get()
-            marks_info = {'student_id': doc.id}
+            marks_info = {'student_id': student_id}
             if notebook.exists:
                 notebook_dict = notebook.to_dict()
-                max_marks = notebook_dict.get('max_marks', None)
-                if 'graded_at' in notebook_dict:   
-                    #notebook has been graded, so we can return the total marks (even if zero)             
+                max_marks = notebook_dict.get('max_marks', max_marks)
+                if 'graded_at' in notebook_dict:
                     marks_info['total_marks'] = notebook_dict.get('total_marks', None)
                 else:
-                    marks_info['total_marks'] = -1 # Indicate not graded yet with -1
+                    logging.warning(f"Notebook '{notebook_id}' for student '{student_id}' in course '{course_handle}' exists but has not been graded yet.")
+                    marks_info['total_marks'] = -1
             else:
-                marks_info['total_marks'] = 0 # Indicate no submission with None
+                logging.warning(f"Notebook '{notebook_id}' not found for student '{student_id}' in course '{course_handle}'.")
+                marks_info['total_marks'] = None
             marks_list.append(marks_info)
 
     except google_exceptions.NotFound:
