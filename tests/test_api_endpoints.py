@@ -227,6 +227,146 @@ class TestEvalEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# /grade_notebook endpoint
+# ---------------------------------------------------------------------------
+
+class TestGradeNotebookEndpoint:
+    def test_grade_notebook_requires_auth(self, client):
+        """Unauthenticated request should be rejected."""
+        resp = client.post(
+            "/grade_notebook",
+            json={
+                "student_id": "student@test.com", "notebook_id": "hw1",
+                "course_id": "6.001", "term_id": "2025", "institution_id": "mit",
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_grade_notebook_non_instructor_rejected(self, client):
+        """Non-instructor user should get 403."""
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+        courses[course_handle] = {"isactive_eval": True, "instructor_gmail": "prof@test.com"}
+
+        resp = client.post(
+            "/grade_notebook",
+            json={
+                "student_id": "student@test.com", "notebook_id": "hw1",
+                "course_id": "6.001", "term_id": "2025", "institution_id": "mit",
+            },
+            headers=_auth_header(email="student@test.com"),
+        )
+        assert resp.status_code == 403
+
+        del courses[course_handle]
+
+    def test_grade_notebook_course_not_found(self, client):
+        """Non-existent course should return 404 or 503."""
+        resp = client.post(
+            "/grade_notebook",
+            json={
+                "student_id": "student@test.com", "notebook_id": "hw1",
+                "course_id": "nonexistent", "term_id": "2025", "institution_id": "mit",
+            },
+            headers=_admin_header(),
+        )
+        assert resp.status_code in (404, 503)
+
+    def test_grade_notebook_single_student(self, client):
+        """Full /grade_notebook flow for a single student with mocked scoring."""
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+
+        courses[course_handle] = {
+            "isactive_eval": True,
+            "instructor_gmail": "admin@test.com",
+            "hw1": {
+                "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
+                "answers": {"1": [{"percent": 100, "component": "4"}]},
+                "max_marks": 10.0,
+            },
+        }
+
+        mock_answers = {"1": [{"component": "4"}]}
+
+        with patch("api_server.score_question", new_callable=AsyncMock, return_value=(10.0, "Perfect. Total marks: 10")):
+            with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
+                with patch("api_server.get_student_notebook_answers", new_callable=AsyncMock, return_value=mock_answers):
+                    with patch("api_server.update_marks", new_callable=AsyncMock):
+                        resp = client.post(
+                            "/grade_notebook",
+                            json={
+                                "student_id": "student@test.com",
+                                "notebook_id": "hw1",
+                                "course_id": "6.001",
+                                "term_id": "2025",
+                                "institution_id": "mit",
+                            },
+                            headers=_admin_header(),
+                        )
+
+        assert resp.status_code == 200
+        lines = [json.loads(line) for line in resp.text.strip().split("\n") if line]
+        response_msgs = [l for l in lines if l["type"] == "response"]
+        assert len(response_msgs) == 1
+        assert "1 student(s) graded" in response_msgs[0]["response"]
+
+        del courses[course_handle]
+
+    def test_grade_notebook_all_students(self, client):
+        """Grade all students: one with answers, one without."""
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+
+        courses[course_handle] = {
+            "isactive_eval": True,
+            "instructor_gmail": "admin@test.com",
+            "hw1": {
+                "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
+                "answers": {"1": [{"percent": 100, "component": "4"}]},
+                "max_marks": 10.0,
+            },
+        }
+
+        async def mock_get_answers(db, ch, sid, nid):
+            if sid == "student1@test.com":
+                return {"1": [{"component": "4"}]}
+            return None  # student2 has no submission
+
+        with patch("api_server.get_student_list", new_callable=AsyncMock, return_value=["student1@test.com", "student2@test.com"]):
+            with patch("api_server.score_question", new_callable=AsyncMock, return_value=(10.0, "Perfect. Total marks: 10")):
+                with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
+                    with patch("api_server.get_student_notebook_answers", side_effect=mock_get_answers):
+                        with patch("api_server.update_marks", new_callable=AsyncMock):
+                            resp = client.post(
+                                "/grade_notebook",
+                                json={
+                                    "student_id": "All",
+                                    "notebook_id": "hw1",
+                                    "course_id": "6.001",
+                                    "term_id": "2025",
+                                    "institution_id": "mit",
+                                },
+                                headers=_admin_header(),
+                            )
+
+        assert resp.status_code == 200
+        lines = [json.loads(line) for line in resp.text.strip().split("\n") if line]
+        response_msgs = [l for l in lines if l["type"] == "response"]
+        assert len(response_msgs) == 1
+        assert "1 student(s) graded" in response_msgs[0]["response"]
+        assert "1 skipped" in response_msgs[0]["response"]
+
+        del courses[course_handle]
+
+
+# ---------------------------------------------------------------------------
 # /create_course endpoint (admin-only)
 # ---------------------------------------------------------------------------
 

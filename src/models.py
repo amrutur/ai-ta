@@ -147,6 +147,13 @@ class AddRubricRequest(BaseModel):
 class AddRubricResponse(BaseModel):
     response: str
 
+class GradeNotebookRequest(BaseModel):
+    student_id: str  # specific student email or "All" to grade all students
+    notebook_id: str
+    course_id: str
+    term_id: str
+    institution_id: str
+
 class BuildCourseIndexRequest(BaseModel):
     course_id: str
     term_id: str

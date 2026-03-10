@@ -390,6 +390,28 @@ async def upload_student_notebook(db, course_handle, student_id, student_name, n
         logging.error(f"Error in upload_student_notebook: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error while adding answer notebook.")
 
+async def get_student_notebook_answers(db, course_handle, student_id, notebook_id):
+    '''Fetch the student's submitted answers from their notebook document.
+
+    Path: courses/{course_handle}/Students/{student_id}/Notebooks/{notebook_id}
+
+    Returns:
+        The answers dict if found, or None if the student/notebook doesn't exist
+        or has no answers field.
+    '''
+    try:
+        notebook_ref = (db.collection(u'courses').document(course_handle)
+                        .collection(u'Students').document(student_id)
+                        .collection(u'Notebooks').document(notebook_id))
+        notebook_doc = await notebook_ref.get()
+        if not notebook_doc.exists:
+            return None
+        doc_data = notebook_doc.to_dict()
+        return doc_data.get('answers', None)
+    except Exception as e:
+        logging.error(f"Error fetching student answers for {student_id}/{notebook_id}: {e}")
+        return None
+
 async def save_student_answers(db, course_handle, student_id, notebook_id, answers):
     '''Save the student's answers to their notebook document.
 

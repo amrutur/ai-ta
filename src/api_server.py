@@ -59,6 +59,7 @@ from models import (
     CreateCourseRequest, CreateCourseResponse,
     FetchMarksListRequest, FetchMarksListResponse,
     AddRubricRequest, AddRubricResponse,
+    GradeNotebookRequest,
     BuildCourseIndexRequest, BuildCourseIndexResponse,
     UpdateCourseConfigRequest, UpdateCourseConfigResponse,
     UpdateGlobalConfigRequest, UpdateGlobalConfigResponse
@@ -77,6 +78,7 @@ from database import (
     update_course_info,
     update_marks,
     save_student_answers,
+    get_student_notebook_answers,
     fetch_grader_response,
     create_course,
     make_course_handle,
@@ -814,6 +816,157 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
         except Exception as e:
             logging.error("An exception occurred during evaluation: %s", e)
+            traceback.print_exc()
+            yield json.dumps({"type": "error", "detail": f"An internal error occurred: {e}"}) + "\n"
+
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
+
+
+@app.post("/grade_notebook")
+async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
+    '''Grade a student's (or all students') submitted notebook from the database.
+
+    Reads the student's previously submitted answers from Firestore, grades them
+    against the rubric stored in the course cache, and streams progress back.
+
+    If student_id is "All", grades every student enrolled in the course who has
+    submitted answers for the given notebook.
+
+    Returns a streaming response with newline-delimited JSON lines:
+      {"type": "progress", "message": "..."}   - per-question / per-student progress
+      {"type": "response", "response": "..."}   - final summary
+      {"type": "error", "detail": "..."}         - on failure
+    '''
+
+    user = get_current_user(request)
+    user_gmail = user.get('email')
+
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+
+    # Only instructors / admins may use this endpoint
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors can use the grade_notebook endpoint.")
+
+    # Check if eval API is enabled for this course
+    if not courses[course_handle].get('isactive_eval', False):
+        raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive for this course.")
+
+    course_model = courses[course_handle].get('model')
+    runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
+    notebook_id = query_body.notebook_id
+
+    # Validate rubric data exists for the notebook
+    if notebook_id not in courses[course_handle]:
+        raise HTTPException(status_code=404, detail=f"Rubric notebook data not found for notebook '{notebook_id}' in course '{course_handle}'. Please add the rubric first.")
+
+    rubric_data = courses[course_handle].get(notebook_id)
+    rubric_questions = rubric_data.get('questions', {})
+    rubric_answers = rubric_data.get('answers', {})
+    max_marks_total = rubric_data.get('max_marks', 0.0)
+
+    # Build list of students to grade
+    if query_body.student_id.lower() == "all":
+        student_ids = await get_student_list(config.db, course_handle)
+    else:
+        student_ids = [query_body.student_id]
+
+    async def _grade_one_question(qnum_str, student_answer, student_id):
+        """Grade a single question for a student: RAG retrieval + scoring agent call."""
+        rubric_question = rubric_questions.get(qnum_str, {}).get('question', '')
+        rubric_question_marks = rubric_questions.get(qnum_str, {}).get('marks', 10.0)
+        rubric_answer = rubric_answers.get(qnum_str, '')
+        rubric_answer_str = " ".join(
+            f"({float(a.get('percent'))/100.0*rubric_question_marks}) {a.get('component', '')}"
+            for a in rubric_answer
+        )
+        student_answer_str = " ".join(
+            f"{a.get('component', '')}"
+            for a in student_answer
+        ) if student_answer else ""
+
+        if not rubric_question:
+            logging.error(f"No rubric question found for Q{qnum_str}. Skipping.")
+            return qnum_str, 0.0, f"No rubric question found for Q{qnum_str}."
+
+        rag_material = await retrieve_context(course_handle, rubric_question)
+        marks, response_text = await score_question(
+            rubric_question, str(student_answer_str), str(rubric_answer_str),
+            runner, config.instructor_session_service, student_id,
+            course_material=rag_material
+        )
+        logging.info(f"Graded Q{qnum_str} for {student_id}: {marks} marks")
+        return qnum_str, marks, response_text
+
+    async def _grade_one_student(student_id):
+        """Grade all questions for a single student. Returns (student_id, total_marks, graded_dict) or None if skipped."""
+        answers = await get_student_notebook_answers(config.db, course_handle, student_id, notebook_id)
+        if not answers:
+            logging.info(f"No submitted answers for student '{student_id}' notebook '{notebook_id}'. Skipping.")
+            return None
+
+        tasks = [
+            asyncio.create_task(_grade_one_question(qnum_str, student_answer, student_id))
+            for qnum_str, student_answer in answers.items()
+        ]
+
+        graded = {}
+        total_marks = 0.0
+        for finished in asyncio.as_completed(tasks):
+            qnum_str, marks, response_text = await finished
+            total_marks += marks
+            graded[qnum_str] = {'marks': marks, 'response': response_text}
+
+        # Store marks in database
+        await update_marks(config.db, course_handle, student_id, notebook_id, total_marks, max_marks_total, graded)
+
+        return student_id, total_marks, graded
+
+    async def _generate():
+        try:
+            yield json.dumps({"type": "progress", "message": f"Starting grading for {len(student_ids)} student(s), notebook '{notebook_id}'."}) + "\n"
+
+            # Launch grading for all students concurrently
+            student_tasks = [
+                asyncio.create_task(_grade_one_student(sid))
+                for sid in student_ids
+            ]
+
+            graded_count = 0
+            skipped_count = 0
+            results_summary = []
+            pending_tasks = set(student_tasks)
+
+            while pending_tasks:
+                done, pending_tasks = await asyncio.wait(pending_tasks, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    yield json.dumps({"type": "heartbeat"}) + "\n"
+                    continue
+                for finished in done:
+                    try:
+                        result = finished.result()
+                    except Exception as e:
+                        logging.error(f"Error grading a student: {e}")
+                        yield json.dumps({"type": "progress", "message": f"Error grading a student: {e}"}) + "\n"
+                        continue
+
+                    if result is None:
+                        skipped_count += 1
+                        yield json.dumps({"type": "progress", "message": f"Skipped a student (no submitted answers). Progress: {graded_count + skipped_count}/{len(student_ids)}"}) + "\n"
+                    else:
+                        student_id, total_marks, _ = result
+                        graded_count += 1
+                        results_summary.append({"student_id": student_id, "total_marks": total_marks, "max_marks": max_marks_total})
+                        yield json.dumps({"type": "progress", "message": f"Graded {student_id}: {total_marks}/{max_marks_total}. Progress: {graded_count + skipped_count}/{len(student_ids)}"}) + "\n"
+
+            summary = f"Grading complete. {graded_count} student(s) graded, {skipped_count} skipped (no submission)."
+            logging.info(summary)
+            yield json.dumps({"type": "response", "response": summary, "results": results_summary}) + "\n"
+
+        except Exception as e:
+            logging.error("An exception occurred during grade_notebook: %s", e)
             traceback.print_exc()
             yield json.dumps({"type": "error", "detail": f"An internal error occurred: {e}"}) + "\n"
 
