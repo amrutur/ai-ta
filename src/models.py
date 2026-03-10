@@ -91,7 +91,7 @@ class FetchMarksListRequest(BaseModel):
 
 class FetchMarksListResponse(BaseModel):
     max_marks: float | None = None
-    marks_list: Dict[str, Any] | None = None
+    marks_list: List[Dict[str, Any]] | None = None
 
 
 class NotifyGradedRequest(BaseModel):
