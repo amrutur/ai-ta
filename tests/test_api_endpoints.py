@@ -293,21 +293,22 @@ class TestGradeNotebookEndpoint:
 
         mock_answers = {"1": [{"component": "4"}]}
 
-        with patch("api_server.score_question", new_callable=AsyncMock, return_value=(10.0, "Perfect. Total marks: 10")):
-            with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
-                with patch("api_server.get_student_notebook_answers", new_callable=AsyncMock, return_value=mock_answers):
-                    with patch("api_server.update_marks", new_callable=AsyncMock):
-                        resp = client.post(
-                            "/grade_notebook",
-                            json={
-                                "student_id": "student@test.com",
-                                "notebook_id": "hw1",
-                                "course_id": "6.001",
-                                "term_id": "2025",
-                                "institution_id": "mit",
-                            },
-                            headers=_admin_header(),
-                        )
+        with patch("api_server.is_notebook_graded", new_callable=AsyncMock, return_value=False):
+            with patch("api_server.score_question", new_callable=AsyncMock, return_value=(10.0, "Perfect. Total marks: 10")):
+                with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
+                    with patch("api_server.get_student_notebook_answers", new_callable=AsyncMock, return_value=mock_answers):
+                        with patch("api_server.update_marks", new_callable=AsyncMock):
+                            resp = client.post(
+                                "/grade_notebook",
+                                json={
+                                    "student_id": "student@test.com",
+                                    "notebook_id": "hw1",
+                                    "course_id": "6.001",
+                                    "term_id": "2025",
+                                    "institution_id": "mit",
+                                },
+                                headers=_admin_header(),
+                            )
 
         assert resp.status_code == 200
         lines = [json.loads(line) for line in resp.text.strip().split("\n") if line]
@@ -339,28 +340,74 @@ class TestGradeNotebookEndpoint:
                 return {"1": [{"component": "4"}]}
             return None  # student2 has no submission
 
-        with patch("api_server.get_student_list", new_callable=AsyncMock, return_value=["student1@test.com", "student2@test.com"]):
-            with patch("api_server.score_question", new_callable=AsyncMock, return_value=(10.0, "Perfect. Total marks: 10")):
-                with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
-                    with patch("api_server.get_student_notebook_answers", side_effect=mock_get_answers):
-                        with patch("api_server.update_marks", new_callable=AsyncMock):
-                            resp = client.post(
-                                "/grade_notebook",
-                                json={
-                                    "student_id": "All",
-                                    "notebook_id": "hw1",
-                                    "course_id": "6.001",
-                                    "term_id": "2025",
-                                    "institution_id": "mit",
-                                },
-                                headers=_admin_header(),
-                            )
+        with patch("api_server.is_notebook_graded", new_callable=AsyncMock, return_value=False):
+            with patch("api_server.get_student_list", new_callable=AsyncMock, return_value=["student1@test.com", "student2@test.com"]):
+                with patch("api_server.score_question", new_callable=AsyncMock, return_value=(10.0, "Perfect. Total marks: 10")):
+                    with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value=""):
+                        with patch("api_server.get_student_notebook_answers", side_effect=mock_get_answers):
+                            with patch("api_server.update_marks", new_callable=AsyncMock):
+                                resp = client.post(
+                                    "/grade_notebook",
+                                    json={
+                                        "student_id": "All",
+                                        "notebook_id": "hw1",
+                                        "course_id": "6.001",
+                                        "term_id": "2025",
+                                        "institution_id": "mit",
+                                    },
+                                    headers=_admin_header(),
+                                )
 
         assert resp.status_code == 200
         lines = [json.loads(line) for line in resp.text.strip().split("\n") if line]
         response_msgs = [l for l in lines if l["type"] == "response"]
         assert len(response_msgs) == 1
         assert "1 student(s) graded" in response_msgs[0]["response"]
+        assert "1 skipped" in response_msgs[0]["response"]
+
+        del courses[course_handle]
+
+    def test_grade_notebook_skips_already_graded(self, client):
+        """Already-graded students are skipped."""
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+
+        courses[course_handle] = {
+            "isactive_eval": True,
+            "instructor_gmail": "admin@test.com",
+            "hw1": {
+                "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
+                "answers": {"1": [{"percent": 100, "component": "4"}]},
+                "max_marks": 10.0,
+            },
+        }
+
+        # is_notebook_graded returns True → student should be skipped entirely
+        with patch("api_server.is_notebook_graded", new_callable=AsyncMock, return_value=True):
+            with patch("api_server.get_student_notebook_answers", new_callable=AsyncMock) as mock_get:
+                with patch("api_server.score_question", new_callable=AsyncMock) as mock_score:
+                    resp = client.post(
+                        "/grade_notebook",
+                        json={
+                            "student_id": "student@test.com",
+                            "notebook_id": "hw1",
+                            "course_id": "6.001",
+                            "term_id": "2025",
+                            "institution_id": "mit",
+                        },
+                        headers=_admin_header(),
+                    )
+
+        assert resp.status_code == 200
+        # Neither answers fetch nor scoring should have been called
+        mock_get.assert_not_called()
+        mock_score.assert_not_called()
+        lines = [json.loads(line) for line in resp.text.strip().split("\n") if line]
+        response_msgs = [l for l in lines if l["type"] == "response"]
+        assert len(response_msgs) == 1
+        assert "0 student(s) graded" in response_msgs[0]["response"]
         assert "1 skipped" in response_msgs[0]["response"]
 
         del courses[course_handle]

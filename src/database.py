@@ -423,6 +423,27 @@ async def get_student_notebook_answers(db, course_handle, student_id, notebook_i
         logging.error(f"Error fetching student answers for {student_id}/{notebook_id}: {e}")
         return None
 
+async def is_notebook_graded(db, course_handle, student_id, notebook_id):
+    '''Check if a student's notebook has already been graded.
+
+    Path: courses/{course_handle}/Students/{student_id}/Notebooks/{notebook_id}
+
+    Returns:
+        True if the notebook document exists and has a 'graded_at' field set, False otherwise.
+    '''
+    try:
+        notebook_ref = (db.collection(u'courses').document(course_handle)
+                        .collection(u'Students').document(student_id)
+                        .collection(u'Notebooks').document(notebook_id))
+        notebook_doc = await notebook_ref.get()
+        if not notebook_doc.exists:
+            return False
+        doc_data = notebook_doc.to_dict()
+        return doc_data.get('graded_at') is not None
+    except Exception as e:
+        logging.error(f"Error checking graded status for {student_id}/{notebook_id}: {e}")
+        return False
+
 async def save_student_answers(db, course_handle, student_id, notebook_id, answers):
     '''Save the student's answers to their notebook document.
 

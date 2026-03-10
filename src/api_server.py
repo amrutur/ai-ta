@@ -79,6 +79,7 @@ from database import (
     update_marks,
     save_student_answers,
     get_student_notebook_answers,
+    is_notebook_graded,
     fetch_grader_response,
     create_course,
     make_course_handle,
@@ -906,6 +907,11 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
 
     async def _grade_one_student(student_id):
         """Grade all questions for a single student. Returns (student_id, total_marks, graded_dict) or None if skipped."""
+        # Skip students whose notebooks are already graded
+        if await is_notebook_graded(config.db, course_handle, student_id, notebook_id):
+            logging.info(f"Student '{student_id}' notebook '{notebook_id}' already graded. Skipping.")
+            return None
+
         answers = await get_student_notebook_answers(config.db, course_handle, student_id, notebook_id)
         if not answers:
             logging.info(f"No submitted answers for student '{student_id}' notebook '{notebook_id}'. Skipping.")
@@ -965,14 +971,14 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
 
                     if result is None:
                         skipped_count += 1
-                        yield json.dumps({"type": "progress", "message": f"Skipped a student (no submitted answers). Progress: {graded_count + skipped_count}/{len(student_ids)}"}) + "\n"
+                        yield json.dumps({"type": "progress", "message": f"Skipped a student (already graded or no submitted answers). Progress: {graded_count + skipped_count}/{len(student_ids)}"}) + "\n"
                     else:
                         student_id, total_marks, _ = result
                         graded_count += 1
                         results_summary.append({"student_id": student_id, "total_marks": total_marks, "max_marks": max_marks_total})
                         yield json.dumps({"type": "progress", "message": f"Graded {student_id}: {total_marks}/{max_marks_total}. Progress: {graded_count + skipped_count}/{len(student_ids)}"}) + "\n"
 
-            summary = f"Grading complete. {graded_count} student(s) graded, {skipped_count} skipped (no submission)."
+            summary = f"Grading complete. {graded_count} student(s) graded, {skipped_count} skipped (already graded or no submission)."
             logging.info(summary)
             yield json.dumps({"type": "response", "response": summary, "results": results_summary}) + "\n"
 
