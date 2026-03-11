@@ -861,10 +861,6 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
     if notebook_id not in courses[course_handle]:
         raise HTTPException(status_code=404, detail=f"Rubric notebook data not found for notebook '{notebook_id}' in course '{course_handle}'. Please add the rubric first.")
 
-    # Check if eval is enabled for this specific notebook
-    if not courses[course_handle][notebook_id].get('isactive_eval', False):
-        raise HTTPException(status_code=503, detail=f"The evaluation API endpoint is currently inactive for notebook '{notebook_id}'.")
-
     rubric_data = courses[course_handle].get(notebook_id)
     rubric_questions = rubric_data.get('questions', {})
     rubric_answers = rubric_data.get('answers', {})
@@ -1487,10 +1483,12 @@ async def upload_rubric_api(
                                              'questions':query_body.questions,
                                              'max_marks': query_body.max_marks,
                                              'answers':query_body.answers,
-                                             'outputs':query_body.outputs} 
+                                             'outputs':query_body.outputs,
+                                             'isactive_eval': True}
 
         #now save the rubric in the databse as well
         await save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers, query_body.outputs)
+        await update_notebook_info(config.db, course_handle, query_body.notebook_id, 'isactive_eval', True)
 
         return AddRubricResponse(
             response=f"Successfully added rubric '{query_body.notebook_id}' to course '{course_handle}'"

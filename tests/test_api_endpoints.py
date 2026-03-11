@@ -457,21 +457,23 @@ class TestUploadRubricEndpoint:
         }
 
         with patch("api_server.save_rubric", new_callable=AsyncMock):
-            resp = client.post(
-                "/upload_rubric",
-                json={
-                    "notebook_id": "hw1", "max_marks": 100.0,
-                    "context": {"1": "ctx"}, "questions": {"1": "Q"},
-                    "answers": {"1": "A"}, "outputs": {"1": ""},
-                    "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
-                },
-                headers=_auth_header(email="instructor@test.com"),
-            )
+            with patch("api_server.update_notebook_info", new_callable=AsyncMock):
+                resp = client.post(
+                    "/upload_rubric",
+                    json={
+                        "notebook_id": "hw1", "max_marks": 100.0,
+                        "context": {"1": "ctx"}, "questions": {"1": "Q"},
+                        "answers": {"1": "A"}, "outputs": {"1": ""},
+                        "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                    },
+                    headers=_auth_header(email="instructor@test.com"),
+                )
 
         assert resp.status_code == 200
         # Verify the rubric was stored in cache under notebook_id
         assert "hw1" in courses[course_handle]
         assert courses[course_handle]["hw1"]["max_marks"] == 100.0
+        assert courses[course_handle]["hw1"]["isactive_eval"] is True
 
         # Clean up
         del courses[course_handle]
