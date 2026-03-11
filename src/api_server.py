@@ -81,6 +81,8 @@ from database import (
     save_student_answers,
     get_student_notebook_answers,
     is_notebook_graded,
+    is_email_notified,
+    mark_email_notified,
     fetch_grader_response,
     create_course,
     make_course_handle,
@@ -1397,81 +1399,149 @@ async def fetch_grader_response_api(
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
-@app.post("/notify_student_grades", response_model=NotifyGradedResponse)
+@app.post("/notify_student_grades")
 async def notify_student_grades_api(
     query_body: NotifyGradedRequest,
     request: Request
 ):
     '''Fetch the graded response for a student from the database and send email notification.
-    If user_email is provided, sends email to that specific student.
-    If user_email is None, sends email to all students who have graded submissions for the notebook.
-    This endpoint is only accessible to instructors.'''
+
+    If student_id is "All", sends email to all students who have graded submissions for the notebook.
+    Otherwise sends to the specific student.
+
+    Emails are sent as background tasks so the work continues even if the client disconnects.
+    Each successful send is recorded in Firestore (email_notified_at). On retry, students
+    who were already notified are skipped unless do_resend is True.
+
+    Returns a streaming response with newline-delimited JSON lines:
+      {"type": "progress", "message": "..."}   - per-student progress
+      {"type": "response", "response": "..."}   - final summary
+      {"type": "error", "detail": "..."}         - on failure
+    '''
 
     user = get_current_user(request)
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
-    try:
+    user_gmail = user.get('email', '').lower()
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
 
-        user_gmail = user.get('email', '').lower()
-        if not is_authorized(user_gmail, course_handle) :
-            raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin")
+    notebook_id = query_body.notebook_id
+    do_resend = query_body.do_resend
 
-        # Build list of students to notify
-        if query_body.student_id.lower() == "all":
-            student_ids = await get_student_list(config.db, course_handle)
+    # Build list of students to notify
+    if query_body.student_id.lower() == "all":
+        student_ids = await get_student_list(config.db, course_handle)
+    else:
+        student_ids = [query_body.student_id]
+
+    if not student_ids:
+        raise HTTPException(status_code=404, detail="No students found to notify.")
+
+    async def _notify_one_student(student_id):
+        """Send grade email to a single student. Returns (student_id, status_string)."""
+        # Check if already notified (unless resending)
+        if not do_resend and await is_email_notified(config.db, course_handle, student_id, notebook_id):
+            logging.info(f"Student '{student_id}' already notified for notebook '{notebook_id}'. Skipping.")
+            return student_id, "already_notified"
+
+        grader_response = await fetch_grader_response(config.db, course_handle, notebook_id, student_id)
+        if not grader_response:
+            logging.warning(f"No graded response found for student_id={student_id} and notebook_id={notebook_id}. Skipping.")
+            return student_id, "no_grades"
+
+        total_marks = grader_response.get('total_marks', 0)
+        max_marks = grader_response.get('max_marks', 0)
+        subject = f"Graded Response for your submission {notebook_id}"
+        msg_body = f"Hello {student_id},\n\n Your marks in {notebook_id} is {total_marks} out of {max_marks}. \n\nDetailed feedback for your submission"
+        msg_body += json.dumps(grader_response, indent=4)
+        msg_body += "\n\nBest regards,\nYour fiendly AI-TA"
+
+        logging.info(f"Instructor {user_gmail} is sending email to {student_id} with subject '{subject}'")
+
+        email_sent = send_email(config._mail_api_key, config._from_email, student_id, subject, msg_body)
+
+        if email_sent:
+            await mark_email_notified(config.db, course_handle, student_id, notebook_id)
+            return student_id, "sent"
         else:
-            student_ids = [query_body.student_id]
+            logging.error(f"Failed to send email to {student_id}")
+            return student_id, "failed"
 
-        sent_count = 0
-        skipped_count = 0
-        failed_count = 0
+    # Launch email tasks *before* entering the streaming generator so they
+    # are not tied to the response lifecycle.  Each task persists its result
+    # to Firestore independently, so even if the HTTP stream is torn down
+    # the email work will run to completion.
+    is_bulk = len(student_ids) > 1
 
-        is_bulk = len(student_ids) > 1
+    if is_bulk:
+        # For bulk sends, stagger tasks with delays to avoid Gmail SMTP rate limits
+        async def _notify_with_delay(student_id, delay):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            return await _notify_one_student(student_id)
 
-        for i, student_id in enumerate(student_ids):
-            grader_response = await fetch_grader_response(config.db, course_handle, query_body.notebook_id, student_id)
-            if not grader_response:
-                logging.warning(f"No graded response found for student_id={student_id} and notebook_id={query_body.notebook_id}. Skipping.")
-                skipped_count += 1
-                continue
+        student_tasks = [
+            asyncio.create_task(_notify_with_delay(sid, i * 10))
+            for i, sid in enumerate(student_ids)
+        ]
+    else:
+        student_tasks = [
+            asyncio.create_task(_notify_one_student(sid))
+            for sid in student_ids
+        ]
 
-            total_marks = grader_response.get('total_marks', 0)
-            max_marks = grader_response.get('max_marks', 0)
-            subject = f"Graded Response for your submission {query_body.notebook_id}"
-            msg_body = f"Hello {student_id},\n\n Your marks in {query_body.notebook_id} is {total_marks} out of {max_marks}. \n\nDetailed feedback for your submission"
+    async def _generate():
+        try:
+            yield json.dumps({"type": "progress", "message": f"Starting email notifications for {len(student_ids)} student(s), notebook '{notebook_id}'."}) + "\n"
 
-            msg_body += json.dumps(grader_response, indent=4)
+            sent_count = 0
+            skipped_count = 0
+            failed_count = 0
+            pending_tasks = set(student_tasks)
 
-            msg_body += "\n\nBest regards,\nYour fiendly AI-TA"
+            while pending_tasks:
+                done, pending_tasks = await asyncio.wait(pending_tasks, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    yield json.dumps({"type": "heartbeat"}) + "\n"
+                    continue
+                for finished in done:
+                    try:
+                        student_id, status = finished.result()
+                    except Exception as e:
+                        logging.error(f"Error notifying a student: {e}")
+                        failed_count += 1
+                        yield json.dumps({"type": "progress", "message": f"Error notifying a student: {e}"}) + "\n"
+                        continue
 
-            logging.info(f"Instructor {user_gmail} is sending email to {student_id} with subject '{subject}'")
+                    if status == "sent":
+                        sent_count += 1
+                        yield json.dumps({"type": "progress", "message": f"Email sent to {student_id}. Progress: {sent_count + skipped_count + failed_count}/{len(student_ids)}"}) + "\n"
+                    elif status in ("no_grades", "already_notified"):
+                        skipped_count += 1
+                        reason = "already notified" if status == "already_notified" else "no graded response"
+                        yield json.dumps({"type": "progress", "message": f"Skipped {student_id} ({reason}). Progress: {sent_count + skipped_count + failed_count}/{len(student_ids)}"}) + "\n"
+                    else:
+                        failed_count += 1
+                        yield json.dumps({"type": "progress", "message": f"Failed to send email to {student_id}. Progress: {sent_count + skipped_count + failed_count}/{len(student_ids)}"}) + "\n"
 
-            email_sent = send_email(config._mail_api_key, config._from_email, student_id, subject, msg_body)
+            summary = f"Sent {sent_count} email(s), skipped {skipped_count} (no graded response or already notified), {failed_count} failed."
+            logging.info(summary)
+            yield json.dumps({"type": "response", "response": summary}) + "\n"
 
-            if email_sent:
-                sent_count += 1
-            else:
-                logging.error(f"Failed to send email to {student_id}")
-                failed_count += 1
+        except asyncio.CancelledError:
+            # Stream was torn down (client disconnect or server shutdown).
+            # The email tasks are independent top-level tasks and will
+            # continue running; just log and exit the generator cleanly.
+            logging.warning("notify_student_grades stream cancelled; email tasks will continue in the background.")
+            return
 
-            # Throttle bulk emails to avoid Gmail SMTP rate limits
-            if is_bulk and i < len(student_ids) - 1:
-                await asyncio.sleep(10)
+        except Exception as e:
+            logging.error("An exception occurred during notify_student_grades: %s", e)
+            traceback.print_exc()
+            yield json.dumps({"type": "error", "detail": f"An internal error occurred: {e}"}) + "\n"
 
-        if sent_count == 0 and skipped_count == 0 and failed_count == 0:
-            raise HTTPException(status_code=404, detail="No students found to notify.")
-
-        summary = f"Sent {sent_count} email(s), skipped {skipped_count} (no graded response), {failed_count} failed."
-        logging.info(summary)
-        return NotifyGradedResponse(response=summary)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        # By logging the exception with its traceback, you can see the root cause in your server logs.
-        logging.error("An exception occurred during notify_student_grades_api: %s", e)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
 
 @app.post("/upload_rubric", response_model=AddRubricResponse)

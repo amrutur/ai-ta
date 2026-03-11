@@ -471,6 +471,45 @@ async def is_notebook_graded(db, course_handle, student_id, notebook_id):
         logging.error(f"Error checking graded status for {student_id}/{notebook_id}: {e}")
         return False
 
+async def is_email_notified(db, course_handle, student_id, notebook_id):
+    '''Check if a grade notification email has already been sent for this student/notebook.
+
+    Path: courses/{course_handle}/Students/{student_id}/Notebooks/{notebook_id}
+
+    Returns:
+        True if the notebook document has an 'email_notified_at' field set, False otherwise.
+    '''
+    try:
+        notebook_ref = (db.collection(u'courses').document(course_handle)
+                        .collection(u'Students').document(student_id)
+                        .collection(u'Notebooks').document(notebook_id))
+        notebook_doc = await notebook_ref.get()
+        if not notebook_doc.exists:
+            return False
+        doc_data = notebook_doc.to_dict()
+        return doc_data.get('email_notified_at') is not None
+    except Exception as e:
+        logging.error(f"Error checking email notification status for {student_id}/{notebook_id}: {e}")
+        return False
+
+
+async def mark_email_notified(db, course_handle, student_id, notebook_id):
+    '''Record that a grade notification email was sent for this student/notebook.
+
+    Path: courses/{course_handle}/Students/{student_id}/Notebooks/{notebook_id}
+    Sets the 'email_notified_at' field to the server timestamp.
+    '''
+    try:
+        notebook_ref = (db.collection(u'courses').document(course_handle)
+                        .collection(u'Students').document(student_id)
+                        .collection(u'Notebooks').document(notebook_id))
+        await notebook_ref.set({
+            u'email_notified_at': firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+    except Exception as e:
+        logging.error(f"Error marking email notified for {student_id}/{notebook_id}: {e}")
+
+
 async def save_student_answers(db, course_handle, student_id, notebook_id, answers):
     '''Save the student's answers to their notebook document.
 

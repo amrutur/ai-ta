@@ -987,6 +987,20 @@ class TestRateLimitStatusEndpoint:
 # /notify_student_grades endpoint
 # ---------------------------------------------------------------------------
 
+def _parse_ndjson_stream(resp):
+    """Parse an NDJSON streaming response into a list of parsed JSON objects."""
+    lines = resp.text.strip().split("\n")
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def _get_final_response(events):
+    """Extract the final 'response' event from a list of NDJSON events."""
+    for event in events:
+        if event.get("type") == "response":
+            return event
+    return None
+
+
 class TestNotifyStudentGradesEndpoint:
 
     def _setup_course(self, instructor_email="instructor@test.com"):
@@ -1036,21 +1050,25 @@ class TestNotifyStudentGradesEndpoint:
         course_handle = self._setup_course()
         try:
             grader_response = {"total_marks": 8, "max_marks": 10, "feedback": "Good work"}
-            with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_response):
-                with patch("api_server.send_email", return_value=True) as mock_send:
-                    resp = client.post(
-                        "/notify_student_grades",
-                        json={
-                            "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
-                            "notebook_id": "hw1", "student_id": "student@test.com",
-                        },
-                        headers=_auth_header(email="instructor@test.com"),
-                    )
+            with patch("api_server.is_email_notified", new_callable=AsyncMock, return_value=False):
+                with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_response):
+                    with patch("api_server.send_email", return_value=True) as mock_send:
+                        with patch("api_server.mark_email_notified", new_callable=AsyncMock):
+                            resp = client.post(
+                                "/notify_student_grades",
+                                json={
+                                    "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                                    "notebook_id": "hw1", "student_id": "student@test.com",
+                                },
+                                headers=_auth_header(email="instructor@test.com"),
+                            )
 
             assert resp.status_code == 200
-            data = resp.json()
-            assert "Sent 1" in data["response"]
-            assert "0 failed" in data["response"]
+            events = _parse_ndjson_stream(resp)
+            final = _get_final_response(events)
+            assert final is not None
+            assert "Sent 1" in final["response"]
+            assert "0 failed" in final["response"]
             mock_send.assert_called_once()
             call_args = mock_send.call_args
             assert call_args[0][2] == "student@test.com"  # to address
@@ -1062,20 +1080,23 @@ class TestNotifyStudentGradesEndpoint:
         """If student has no graded response, they are skipped."""
         course_handle = self._setup_course()
         try:
-            with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=None):
-                with patch("api_server.send_email") as mock_send:
-                    resp = client.post(
-                        "/notify_student_grades",
-                        json={
-                            "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
-                            "notebook_id": "hw1", "student_id": "student@test.com",
-                        },
-                        headers=_auth_header(email="instructor@test.com"),
-                    )
+            with patch("api_server.is_email_notified", new_callable=AsyncMock, return_value=False):
+                with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=None):
+                    with patch("api_server.send_email") as mock_send:
+                        resp = client.post(
+                            "/notify_student_grades",
+                            json={
+                                "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                                "notebook_id": "hw1", "student_id": "student@test.com",
+                            },
+                            headers=_auth_header(email="instructor@test.com"),
+                        )
 
             assert resp.status_code == 200
-            data = resp.json()
-            assert "skipped 1" in data["response"]
+            events = _parse_ndjson_stream(resp)
+            final = _get_final_response(events)
+            assert final is not None
+            assert "skipped 1" in final["response"]
             mock_send.assert_not_called()
         finally:
             self._cleanup(course_handle)
@@ -1097,22 +1118,26 @@ class TestNotifyStudentGradesEndpoint:
                 return True
 
             with patch("api_server.get_student_list", new_callable=AsyncMock, return_value=["student1@test.com", "student2@test.com", "student3@test.com"]):
-                with patch("api_server.fetch_grader_response", side_effect=mock_fetch):
-                    with patch("api_server.send_email", side_effect=mock_send):
-                        resp = client.post(
-                            "/notify_student_grades",
-                            json={
-                                "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
-                                "notebook_id": "hw1", "student_id": "all",
-                            },
-                            headers=_auth_header(email="instructor@test.com"),
-                        )
+                with patch("api_server.is_email_notified", new_callable=AsyncMock, return_value=False):
+                    with patch("api_server.fetch_grader_response", side_effect=mock_fetch):
+                        with patch("api_server.send_email", side_effect=mock_send):
+                            with patch("api_server.mark_email_notified", new_callable=AsyncMock):
+                                resp = client.post(
+                                    "/notify_student_grades",
+                                    json={
+                                        "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                                        "notebook_id": "hw1", "student_id": "all",
+                                    },
+                                    headers=_auth_header(email="instructor@test.com"),
+                                )
 
             assert resp.status_code == 200
-            data = resp.json()
-            assert "Sent 1" in data["response"]
-            assert "skipped 1" in data["response"]
-            assert "1 failed" in data["response"]
+            events = _parse_ndjson_stream(resp)
+            final = _get_final_response(events)
+            assert final is not None
+            assert "Sent 1" in final["response"]
+            assert "skipped 1" in final["response"]
+            assert "1 failed" in final["response"]
         finally:
             self._cleanup(course_handle)
 
@@ -1121,21 +1146,24 @@ class TestNotifyStudentGradesEndpoint:
         course_handle = self._setup_course()
         try:
             grader_response = {"total_marks": 8, "max_marks": 10}
-            with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_response):
-                with patch("api_server.send_email", return_value=False):
-                    resp = client.post(
-                        "/notify_student_grades",
-                        json={
-                            "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
-                            "notebook_id": "hw1", "student_id": "student@test.com",
-                        },
-                        headers=_auth_header(email="instructor@test.com"),
-                    )
+            with patch("api_server.is_email_notified", new_callable=AsyncMock, return_value=False):
+                with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_response):
+                    with patch("api_server.send_email", return_value=False):
+                        resp = client.post(
+                            "/notify_student_grades",
+                            json={
+                                "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                                "notebook_id": "hw1", "student_id": "student@test.com",
+                            },
+                            headers=_auth_header(email="instructor@test.com"),
+                        )
 
             assert resp.status_code == 200
-            data = resp.json()
-            assert "1 failed" in data["response"]
-            assert "Sent 0" in data["response"]
+            events = _parse_ndjson_stream(resp)
+            final = _get_final_response(events)
+            assert final is not None
+            assert "1 failed" in final["response"]
+            assert "Sent 0" in final["response"]
         finally:
             self._cleanup(course_handle)
 
@@ -1154,5 +1182,57 @@ class TestNotifyStudentGradesEndpoint:
                 )
 
             assert resp.status_code == 404
+        finally:
+            self._cleanup(course_handle)
+
+    def test_already_notified_skipped(self, client):
+        """Students already notified should be skipped when do_resend is False."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.is_email_notified", new_callable=AsyncMock, return_value=True):
+                with patch("api_server.send_email") as mock_send:
+                    resp = client.post(
+                        "/notify_student_grades",
+                        json={
+                            "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                            "notebook_id": "hw1", "student_id": "student@test.com",
+                        },
+                        headers=_auth_header(email="instructor@test.com"),
+                    )
+
+            assert resp.status_code == 200
+            events = _parse_ndjson_stream(resp)
+            final = _get_final_response(events)
+            assert final is not None
+            assert "skipped 1" in final["response"]
+            mock_send.assert_not_called()
+        finally:
+            self._cleanup(course_handle)
+
+    def test_do_resend_overrides_already_notified(self, client):
+        """With do_resend=True, already-notified students should still get emailed."""
+        course_handle = self._setup_course()
+        try:
+            grader_response = {"total_marks": 8, "max_marks": 10, "feedback": "Good work"}
+            with patch("api_server.is_email_notified", new_callable=AsyncMock, return_value=True):
+                with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_response):
+                    with patch("api_server.send_email", return_value=True) as mock_send:
+                        with patch("api_server.mark_email_notified", new_callable=AsyncMock):
+                            resp = client.post(
+                                "/notify_student_grades",
+                                json={
+                                    "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                                    "notebook_id": "hw1", "student_id": "student@test.com",
+                                    "do_resend": True,
+                                },
+                                headers=_auth_header(email="instructor@test.com"),
+                            )
+
+            assert resp.status_code == 200
+            events = _parse_ndjson_stream(resp)
+            final = _get_final_response(events)
+            assert final is not None
+            assert "Sent 1" in final["response"]
+            mock_send.assert_called_once()
         finally:
             self._cleanup(course_handle)

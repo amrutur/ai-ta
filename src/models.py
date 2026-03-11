@@ -100,6 +100,7 @@ class NotifyGradedRequest(BaseModel):
     course_id: str
     notebook_id: str
     student_id: str
+    do_resend: bool = False
 
 class NotifyGradedResponse(BaseModel):
     response: str
