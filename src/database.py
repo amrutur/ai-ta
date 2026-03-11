@@ -635,7 +635,7 @@ async def fetch_grader_response(db, course_handle:str, notebook_id: str = None, 
 
         answer_dict = answer_doc.to_dict()
 
-        graded_json = answer_dict.get('graded_json', None)
+        graded_json = answer_dict.get('grader_response', None)
 
         if graded_json is None:
             logging.warning(f"Graded response for notebook '{notebook_id}' for student '{student_id}' in course '{course_handle}' not found. This may be because the notebook has not been graded yet, or because the grading data is in an older format. Returning None for this student's response.")

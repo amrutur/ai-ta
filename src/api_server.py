@@ -1416,37 +1416,51 @@ async def notify_student_grades_api(
         if not is_authorized(user_gmail, course_handle) :
             raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin")
 
-            
-        student_id = query_body.student_id
-
-        grader_response = await fetch_grader_response(config.db, course_handle, query_body.notebook_id, query_body.student_id)
-        if not grader_response:
-            logging.warning(f"No graded response found for student_id={student_id} and notebook_id={query_body.notebook_id}")
-            raise HTTPException(status_code=404, detail="No graded response found")
-
-        total_marks = grader_response.get('total_marks', 0)
-        max_marks = grader_response.get('max_marks', 0)
-        subject = f"Graded Response for your submission {query_body.notebook_id}"
-        msg_body = f"Hello {student_id},\n\n Your marks in {query_body.notebook_id} is {total_marks} out of {max_marks}. \n\nDetailed feedback for your submission"
-
-        msg_body += json.dumps(grader_response, indent=4)
-
-        msg_body += "\n\nBest regards,\nYour fiendly AI-TA"
-
-        logging.info(f"Instructor {user_gmail} is sending email to {student_id} with subject '{subject}'")
-
-        email_sent = send_email(config.sendgrid_client, config.sendgrid_from_email, student_id, subject, msg_body)
-
-        if email_sent:
-            return NotifyGradedResponse(
-                response=f"Successfully sent email to {student_id} with graded response."
-            )
+        # Build list of students to notify
+        if query_body.student_id.lower() == "all":
+            student_ids = await get_student_list(config.db, course_handle)
         else:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to send email. Please check server logs and ensure email service is properly configured."
-            )
-    
+            student_ids = [query_body.student_id]
+
+        sent_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for student_id in student_ids:
+            grader_response = await fetch_grader_response(config.db, course_handle, query_body.notebook_id, student_id)
+            if not grader_response:
+                logging.warning(f"No graded response found for student_id={student_id} and notebook_id={query_body.notebook_id}. Skipping.")
+                skipped_count += 1
+                continue
+
+            total_marks = grader_response.get('total_marks', 0)
+            max_marks = grader_response.get('max_marks', 0)
+            subject = f"Graded Response for your submission {query_body.notebook_id}"
+            msg_body = f"Hello {student_id},\n\n Your marks in {query_body.notebook_id} is {total_marks} out of {max_marks}. \n\nDetailed feedback for your submission"
+
+            msg_body += json.dumps(grader_response, indent=4)
+
+            msg_body += "\n\nBest regards,\nYour fiendly AI-TA"
+
+            logging.info(f"Instructor {user_gmail} is sending email to {student_id} with subject '{subject}'")
+
+            email_sent = send_email(config.sendgrid_client, config.sendgrid_from_email, student_id, subject, msg_body)
+
+            if email_sent:
+                sent_count += 1
+            else:
+                logging.error(f"Failed to send email to {student_id}")
+                failed_count += 1
+
+        if sent_count == 0 and skipped_count == 0 and failed_count == 0:
+            raise HTTPException(status_code=404, detail="No students found to notify.")
+
+        summary = f"Sent {sent_count} email(s), skipped {skipped_count} (no graded response), {failed_count} failed."
+        logging.info(summary)
+        return NotifyGradedResponse(response=summary)
+
+    except HTTPException:
+        raise
     except Exception as e:
         # By logging the exception with its traceback, you can see the root cause in your server logs.
         logging.error("An exception occurred during notify_student_grades_api: %s", e)
