@@ -155,10 +155,7 @@ class TestGradeEndpoint:
 
 class TestEvalEndpoint:
     def test_eval_course_not_found(self, client):
-        """If course not in cache, /eval should return an error.
-        courses is a defaultdict(dict) so accessing a missing key creates
-        an empty dict.  isactive_eval defaults to False → 503.
-        """
+        """If course not in cache, /eval should return 404 or 503."""
         resp = client.post(
             "/eval",
             json={
@@ -168,7 +165,7 @@ class TestEvalEndpoint:
             },
             headers=_auth_header(),
         )
-        # defaultdict auto-creates the key → isactive_eval missing → 503
+        # defaultdict auto-creates the key → notebook missing → 503
         assert resp.status_code in (404, 503)
 
     def test_eval_with_valid_course_and_rubric(self, client):
@@ -180,8 +177,8 @@ class TestEvalEndpoint:
 
         # Set up course cache with rubric data
         courses[course_handle] = {
-            "isactive_eval": True,
             "hw1": {
+                "isactive_eval": True,
                 "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
                 "answers": {"1": [{"percent": 100, "component": "4"}]},
                 "outputs": {"1": ""},
@@ -248,7 +245,7 @@ class TestGradeNotebookEndpoint:
         from database import make_course_handle
 
         course_handle = make_course_handle("mit", "2025", "6.001")
-        courses[course_handle] = {"isactive_eval": True, "instructor_gmail": "prof@test.com"}
+        courses[course_handle] = {"instructor_gmail": "prof@test.com"}
 
         resp = client.post(
             "/grade_notebook",
@@ -282,9 +279,9 @@ class TestGradeNotebookEndpoint:
         course_handle = make_course_handle("mit", "2025", "6.001")
 
         courses[course_handle] = {
-            "isactive_eval": True,
             "instructor_gmail": "admin@test.com",
             "hw1": {
+                "isactive_eval": True,
                 "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
                 "answers": {"1": [{"percent": 100, "component": "4"}]},
                 "max_marks": 10.0,
@@ -326,9 +323,9 @@ class TestGradeNotebookEndpoint:
         course_handle = make_course_handle("mit", "2025", "6.001")
 
         courses[course_handle] = {
-            "isactive_eval": True,
             "instructor_gmail": "admin@test.com",
             "hw1": {
+                "isactive_eval": True,
                 "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
                 "answers": {"1": [{"percent": 100, "component": "4"}]},
                 "max_marks": 10.0,
@@ -375,9 +372,9 @@ class TestGradeNotebookEndpoint:
         course_handle = make_course_handle("mit", "2025", "6.001")
 
         courses[course_handle] = {
-            "isactive_eval": True,
             "instructor_gmail": "admin@test.com",
             "hw1": {
+                "isactive_eval": True,
                 "questions": {"1": {"question": "What is 2+2?", "marks": 10.0}},
                 "answers": {"1": [{"percent": 100, "component": "4"}]},
                 "max_marks": 10.0,
@@ -653,9 +650,9 @@ class TestRateLimiting:
         courses[course_handle] = {
             "instructor_gmail": instructor_email,
             "isactive_tutor": True,
-            "isactive_eval": True,
             "student_rate_limit": rate_limit,
             "student_rate_limit_window": window,
+            "hw1": {"isactive_eval": True},
         }
         return course_handle
 
@@ -803,7 +800,6 @@ class TestUpdateCourseConfigRateLimit:
         courses[course_handle] = {
             "instructor_gmail": instructor_email,
             "isactive_tutor": True,
-            "isactive_eval": True,
             "student_rate_limit": None,
             "student_rate_limit_window": None,
         }

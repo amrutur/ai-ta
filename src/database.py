@@ -118,6 +118,33 @@ async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, 
         logging.error(f"An unexpected error occurred in save_rubric: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while saving the rubric.")
 
+async def update_notebook_info(db, course_handle: str, notebook_id: str, keyname: str, value: Any):
+    '''Update a field on a notebook document in Firestore.
+
+    Path: courses/{course_handle}/Notebooks/{notebook_id}
+    '''
+    try:
+        notebook_ref = (db.collection(u'courses').document(course_handle)
+                        .collection(u'Notebooks').document(notebook_id))
+        notebook_doc = await notebook_ref.get()
+        if not notebook_doc.exists:
+            raise NotebookNotFoundError(notebook_id, "unknown", course_handle)
+        await notebook_ref.set({keyname: value, 'last_updated': firestore.SERVER_TIMESTAMP}, merge=True)
+    except (NotebookNotFoundError, CourseNotFoundError):
+        raise
+    except google_exceptions.NotFound:
+        logging.error("Firestore collection 'courses' not found.")
+        raise HTTPException(status_code=500, detail="Database access error.")
+    except google_exceptions.PermissionDenied:
+        logging.error("Check your Service Account permissions.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+    except google_exceptions.GoogleAPICallError as e:
+        logging.error(f"A network error occurred with Firestore: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in update_notebook_info: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while updating the notebook.")
+
 async def get_student_list(db, course_handle: str):
     '''Return the list of student gmails for the course_id in the Firestore database.'''
     try:

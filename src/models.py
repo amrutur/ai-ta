@@ -127,6 +127,12 @@ class TutorInteractionRequest(BaseModel):
     term_id: str
     institution_id: str
 
+class EvalToggleRequest(BaseModel):
+    notebook_id: str
+    course_id: str
+    term_id: str
+    institution_id: str
+
 class TutorInteractionResponse(BaseModel):
     response: str
 
@@ -170,7 +176,6 @@ class UpdateCourseConfigRequest(BaseModel):
     term_id: str
     course_id: str
     model: Optional[str] = None
-    isactive_eval: Optional[bool] = None
     isactive_tutor: Optional[bool] = None
     student_rate_limit: Optional[int] = None
     student_rate_limit_window: Optional[int] = None

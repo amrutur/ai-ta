@@ -55,7 +55,7 @@ from models import (
     EvalRequest, EvalResponse,
     FetchGradedRequest, FetchGradedResponse,
     NotifyGradedRequest, NotifyGradedResponse,
-    TutorInteractionRequest, TutorInteractionResponse,
+    TutorInteractionRequest, TutorInteractionResponse, EvalToggleRequest,
     CreateCourseRequest, CreateCourseResponse,
     FetchMarksListRequest, FetchMarksListResponse,
     AddRubricRequest, AddRubricResponse,
@@ -76,6 +76,7 @@ from database import (
     add_student_notebook_if_not_exists,
     upload_student_notebook,
     update_course_info,
+    update_notebook_info,
     update_marks,
     save_student_answers,
     get_student_notebook_answers,
@@ -156,7 +157,6 @@ async def load_courses_cache():
         for course_handle, course_data in all_courses.items():
             courses[course_handle] = course_data
             courses[course_handle].setdefault('isactive_tutor', True)
-            courses[course_handle].setdefault('isactive_eval', False)
             courses[course_handle].setdefault('student_rate_limit', None)
             courses[course_handle].setdefault('student_rate_limit_window', None)
             # model defaults to None (uses agent.DEFAULT_MODEL via the runner factory)
@@ -717,9 +717,12 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     if course_handle not in courses:
         raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
 
-    # Check if eval API is enabled for this course
-    if not courses[course_handle].get('isactive_eval', False):
-        raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive for this course.")
+    notebook_id = query_body.notebook_id
+
+    # Check if eval is enabled for this specific notebook
+    notebook_data = courses[course_handle].get(notebook_id)
+    if not notebook_data or not notebook_data.get('isactive_eval', False):
+        raise HTTPException(status_code=503, detail=f"The evaluation API endpoint is currently inactive for notebook '{notebook_id}'.")
 
     # Per-student rate limit (skipped for instructors)
     if not is_authorized(user_gmail, course_handle):
@@ -727,7 +730,6 @@ async def eval_submission(query_body: EvalRequest, request: Request):
 
     course_model = courses[course_handle].get('model')
     runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
-    notebook_id = query_body.notebook_id
 
     async def _generate():
         try:
@@ -851,10 +853,6 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
     if not is_authorized(user_gmail, course_handle):
         raise HTTPException(status_code=403, detail="Only instructors can use the grade_notebook endpoint.")
 
-    # Check if eval API is enabled for this course
-    if not courses[course_handle].get('isactive_eval', False):
-        raise HTTPException(status_code=503, detail="The evaluation API endpoint is currently inactive for this course.")
-
     course_model = courses[course_handle].get('model')
     runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
     notebook_id = query_body.notebook_id
@@ -862,6 +860,10 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
     # Validate rubric data exists for the notebook
     if notebook_id not in courses[course_handle]:
         raise HTTPException(status_code=404, detail=f"Rubric notebook data not found for notebook '{notebook_id}' in course '{course_handle}'. Please add the rubric first.")
+
+    # Check if eval is enabled for this specific notebook
+    if not courses[course_handle][notebook_id].get('isactive_eval', False):
+        raise HTTPException(status_code=503, detail=f"The evaluation API endpoint is currently inactive for notebook '{notebook_id}'.")
 
     rubric_data = courses[course_handle].get(notebook_id)
     rubric_questions = rubric_data.get('questions', {})
@@ -1148,25 +1150,30 @@ async def enable_tutor(
 
 @app.post("/disable_eval")
 async def disable_eval(
-    query_body: TutorInteractionRequest,
+    query_body: EvalToggleRequest,
     request: Request
 ):
     '''
-    Disable the eval endpoint.
+    Disable the eval endpoint for a specific notebook.
     This endpoint is only accessible to instructors.
     '''
     user = get_current_user(request)
 
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+    notebook_id = query_body.notebook_id
 
     try:
         user_gmail = user.get('email', '').lower()
-        if not is_authorized(user_gmail, course_handle) :
-            raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin")
-        courses[course_handle]['isactive_eval'] = False
-        await update_course_info(config.db, course_handle, 'isactive_eval', False)
-        logging.info(f"Instructor {user_gmail} has disabled the eval API")
-        return {"message": "Eval API has been disabled successfully"}
+        if not is_authorized(user_gmail, course_handle):
+            raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+        if course_handle not in courses or notebook_id not in courses[course_handle]:
+            raise HTTPException(status_code=404, detail=f"Notebook '{notebook_id}' not found in course '{course_handle}'.")
+        courses[course_handle][notebook_id]['isactive_eval'] = False
+        await update_notebook_info(config.db, course_handle, notebook_id, 'isactive_eval', False)
+        logging.info(f"Instructor {user_gmail} has disabled eval for notebook '{notebook_id}' in course '{course_handle}'")
+        return {"message": f"Eval has been disabled for notebook '{notebook_id}'."}
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("An exception occurred during disable_eval: %s", e)
         traceback.print_exc()
@@ -1175,25 +1182,30 @@ async def disable_eval(
 
 @app.post("/enable_eval")
 async def enable_eval(
-    query_body: TutorInteractionRequest,
+    query_body: EvalToggleRequest,
     request: Request
 ):
     '''
-    Enable the eval endpoint.
+    Enable the eval endpoint for a specific notebook.
     This endpoint is only accessible to instructors.
     '''
     user = get_current_user(request)
 
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+    notebook_id = query_body.notebook_id
 
     try:
         user_gmail = user.get('email', '').lower()
-        if not is_authorized(user_gmail, course_handle) :
-            raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin")
-        courses[course_handle]['isactive_eval'] = True
-        await update_course_info(config.db, course_handle, 'isactive_eval', True)
-        logging.info(f"Instructor {user_gmail} has enabled the eval API")
-        return {"message": "Eval API has been enabled successfully"}
+        if not is_authorized(user_gmail, course_handle):
+            raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+        if course_handle not in courses or notebook_id not in courses[course_handle]:
+            raise HTTPException(status_code=404, detail=f"Notebook '{notebook_id}' not found in course '{course_handle}'.")
+        courses[course_handle][notebook_id]['isactive_eval'] = True
+        await update_notebook_info(config.db, course_handle, notebook_id, 'isactive_eval', True)
+        logging.info(f"Instructor {user_gmail} has enabled eval for notebook '{notebook_id}' in course '{course_handle}'")
+        return {"message": f"Eval has been enabled for notebook '{notebook_id}'."}
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("An exception occurred during enable_eval: %s", e)
         traceback.print_exc()
@@ -1205,7 +1217,7 @@ async def update_course_config(
     query_body: UpdateCourseConfigRequest,
     request: Request
 ):
-    '''Update per-course configuration (model, isactive_eval, isactive_tutor, student_rate_limit, student_rate_limit_window).
+    '''Update per-course configuration (model, isactive_tutor, student_rate_limit, student_rate_limit_window).
     Only accessible to instructors or platform admins.'''
     user = get_current_user(request)
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
@@ -1223,11 +1235,6 @@ async def update_course_config(
             courses[course_handle]['model'] = query_body.model
             await update_course_info(config.db, course_handle, 'model', query_body.model)
             updated['model'] = query_body.model
-
-        if query_body.isactive_eval is not None:
-            courses[course_handle]['isactive_eval'] = query_body.isactive_eval
-            await update_course_info(config.db, course_handle, 'isactive_eval', query_body.isactive_eval)
-            updated['isactive_eval'] = query_body.isactive_eval
 
         if query_body.isactive_tutor is not None:
             courses[course_handle]['isactive_tutor'] = query_body.isactive_tutor
@@ -1970,7 +1977,6 @@ async def create_course_api(
         courses[course_handle]['created_at'] = datetime.datetime.utcnow()
 
         courses[course_handle]['isactive_tutor']= True
-        courses[course_handle]['isactive_eval']= False
 
         if await create_course(config.db, courses[course_handle]):
             logging.info(f"Admin {current_user.get('email')} created course {query_body.course_name} ({courses[course_handle]['course_id']})")
