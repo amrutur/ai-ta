@@ -1444,7 +1444,7 @@ async def notify_student_grades_api(
 
             logging.info(f"Instructor {user_gmail} is sending email to {student_id} with subject '{subject}'")
 
-            email_sent = send_email(config.sendgrid_client, config._sendgrid_from_email, student_id, subject, msg_body)
+            email_sent = send_email(config._mail_api_key, config._from_email, student_id, subject, msg_body)
 
             if email_sent:
                 sent_count += 1

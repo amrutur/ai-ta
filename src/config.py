@@ -134,13 +134,13 @@ def load_app_config():
     firestore_key_raw = get_required_secret(project_id,'FIRESTORE_PRIVATE_KEY_KEY_NAME')
     # Gemini API key is optional — not needed when using Vertex AI with a service account
     gemini_api_key_name = os.environ.get('GEMINI_API_KEY_NAME', '')
-    sendgrid_from_email = os.environ.get('SENDGRID_FROM_EMAIL', '')    
-    sendgrid_api_key = ''
-    if not sendgrid_from_email:
-        logging.warning("SENDGRID_FROM_EMAIL environment variable not set. Email notifications will not work.")
+    from_email = os.environ.get('FROM_EMAIL', '')    
+    mail_api_key = ''
+    if not from_email:
+        logging.warning("FROM_EMAIL environment variable not set. Email notifications will not work.")
     else:
         # Get SendGrid API key from Secret Manager
-        sendgrid_api_key = access_secret_payload(project_id, 'sendgrid-api-key')
+        mail_api_key = access_secret_payload(project_id, 'EMAIL_KEY')
     bucket_name = os.environ.get('BUCKET_NAME',project_id+ '-bucket')    
     gemini_api_key = None
     if gemini_api_key_name:
@@ -224,10 +224,10 @@ def load_app_config():
         "client_config": client_config,
         "redirect_uri_index": redirect_uri_index,
         "gemini_api_key": gemini_api_key,
-        "sendgrid_api_key": sendgrid_api_key,
+        "mail_api_key": mail_api_key,
         "bucket_name": bucket_name,
         "is_production": is_production,
-        "sendgrid_from_email": sendgrid_from_email
+        "from_email": from_email
     }
 
 
@@ -251,24 +251,9 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# Initialize SendGrid email service
-_sendgrid_from_email = _config.get('sendgrid_from_email')
-_sendgrid_api_key = _config.get('sendgrid_api_key')
-
-if _sendgrid_api_key and _sendgrid_from_email:
-    try:
-        sendgrid_client = SendGridAPIClient(_sendgrid_api_key)
-        logging.info(f"SendGrid email service initialized, sending as: {_sendgrid_from_email}")
-    except Exception as e:
-        logging.error(f"Failed to initialize SendGrid service: {e}")
-        sendgrid_client = None
-else:
-    if not _sendgrid_api_key:
-        logging.warning("SendGrid API key not found in Secret Manager (sendgrid-api-key). Email notifications will not work.")
-    if not _sendgrid_from_email:
-        logging.warning("SENDGRID_FROM_EMAIL not configured. Email notifications will not work.")
-        logging.warning("Set SENDGRID_FROM_EMAIL environment variable to enable email notifications.")
-    sendgrid_client = None
+# Initialize  email service
+_from_email = _config.get('from_email')
+_mail_api_key = _config.get('mail_api_key')
 
 client_config = _config["client_config"]
 signing_secret_key = _config["signing_secret_key"]

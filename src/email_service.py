@@ -4,29 +4,28 @@ Email service using SendGrid API.
 
 import logging
 
-from sendgrid.helpers.mail import Mail, Email, To, Content
+#from sendgrid.helpers.mail import Mail, Email, To, Content
+import smtplib
+from email.message import EmailMessage
 
-
-def send_email(sendgrid_client, from_email, to, subject, body):
+def send_email(mail_api_key, from_email, to, subject, body):
     """
-    Send an email using SendGrid API.
+    Send an email using  GMAIL SMTP.
     Returns True if successful, False otherwise.
     """
-    if sendgrid_client is None:
-        logging.error("SendGrid client not initialized. Cannot send email.")
-        logging.error("Please configure SENDGRID_FROM_EMAIL and ensure sendgrid-api-key is in Secret Manager.")
-        return False
 
+    msg = EmailMessage()
+    msg['Subject'] = subject
+    msg['From'] = from_email
+    msg['To'] = to
+    msg.set_content(body)
     try:
-        message = Mail(
-            from_email=Email(from_email),
-            to_emails=To(to),
-            subject=subject,
-            plain_text_content=Content("text/plain", body)
-        )
-
-        response = sendgrid_client.send(message)
-        logging.info(f"Email sent to {to}! Status code: {response.status_code}")
+    # Connect to Gmail's SMTP server
+        with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
+            smtp.starttls()  # Secure the connection
+            smtp.login(from_email, mail_api_key)
+            smtp.send_message(msg)
+        logging.info(f"Email sent to {to}!")
         return True
     except Exception as e:
         logging.error(f"Failed to send email to {to}: {e}")
