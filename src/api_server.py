@@ -1426,7 +1426,9 @@ async def notify_student_grades_api(
         skipped_count = 0
         failed_count = 0
 
-        for student_id in student_ids:
+        is_bulk = len(student_ids) > 1
+
+        for i, student_id in enumerate(student_ids):
             grader_response = await fetch_grader_response(config.db, course_handle, query_body.notebook_id, student_id)
             if not grader_response:
                 logging.warning(f"No graded response found for student_id={student_id} and notebook_id={query_body.notebook_id}. Skipping.")
@@ -1451,6 +1453,10 @@ async def notify_student_grades_api(
             else:
                 logging.error(f"Failed to send email to {student_id}")
                 failed_count += 1
+
+            # Throttle bulk emails to avoid Gmail SMTP rate limits
+            if is_bulk and i < len(student_ids) - 1:
+                await asyncio.sleep(10)
 
         if sent_count == 0 and skipped_count == 0 and failed_count == 0:
             raise HTTPException(status_code=404, detail="No students found to notify.")
