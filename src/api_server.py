@@ -941,15 +941,18 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
 
         return student_id, total_marks, graded
 
+    # Launch grading tasks *before* entering the streaming generator so they
+    # are not tied to the response lifecycle.  Each task writes its results to
+    # the DB independently, so even if the HTTP stream is torn down (e.g. the
+    # server starts shutting down) the grading work will run to completion.
+    student_tasks = [
+        asyncio.create_task(_grade_one_student(sid))
+        for sid in student_ids
+    ]
+
     async def _generate():
         try:
             yield json.dumps({"type": "progress", "message": f"Starting grading for {len(student_ids)} student(s), notebook '{notebook_id}'."}) + "\n"
-
-            # Launch grading for all students concurrently
-            student_tasks = [
-                asyncio.create_task(_grade_one_student(sid))
-                for sid in student_ids
-            ]
 
             graded_count = 0
             skipped_count = 0
@@ -981,6 +984,13 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
             summary = f"Grading complete. {graded_count} student(s) graded, {skipped_count} skipped (already graded or no submission)."
             logging.info(summary)
             yield json.dumps({"type": "response", "response": summary, "results": results_summary}) + "\n"
+
+        except asyncio.CancelledError:
+            # Stream was torn down (client disconnect or server shutdown).
+            # The grading tasks are independent top-level tasks and will
+            # continue running; just log and exit the generator cleanly.
+            logging.warning("grade_notebook stream cancelled; grading tasks will continue in the background.")
+            return
 
         except Exception as e:
             logging.error("An exception occurred during grade_notebook: %s", e)
@@ -1979,4 +1989,4 @@ async def create_course_api(
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     #uvicorn.run(app, host="127.0.0.1", port=port)
-    uvicorn.run(app, host="0.0.0.0", port=port) #allow access from any IP address
+    uvicorn.run(app, host="0.0.0.0", port=port, timeout_graceful_shutdown=300) #allow access from any IP address; 5-min grace for background grading tasks
