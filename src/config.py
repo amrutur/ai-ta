@@ -252,7 +252,7 @@ except Exception as e:
     sys.exit(1)
 
 # Initialize SendGrid email service
-_sendgrid_from_email = _config.get('send_grid_from_email')
+_sendgrid_from_email = _config.get('sendgrid_from_email')
 _sendgrid_api_key = _config.get('sendgrid_api_key')
 
 if _sendgrid_api_key and _sendgrid_from_email:
