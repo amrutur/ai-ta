@@ -905,8 +905,8 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
 
     async def _grade_one_student(student_id):
         """Grade all questions for a single student. Returns (student_id, total_marks, graded_dict) or None if skipped."""
-        # Skip students whose notebooks are already graded
-        if await is_notebook_graded(config.db, course_handle, student_id, notebook_id):
+        # Skip students whose notebooks are already graded (unless regrading)
+        if not query_body.do_regrade and await is_notebook_graded(config.db, course_handle, student_id, notebook_id):
             logging.info(f"Student '{student_id}' notebook '{notebook_id}' already graded. Skipping.")
             return None
 

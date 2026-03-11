@@ -159,6 +159,7 @@ class GradeNotebookRequest(BaseModel):
     course_id: str
     term_id: str
     institution_id: str
+    do_regrade: bool = False
 
 class BuildCourseIndexRequest(BaseModel):
     course_id: str
