@@ -2,7 +2,7 @@
 Configuration, secrets management, and service initialization.
 
 Loads environment variables and secrets from Google Secret Manager,
-initializes Firebase/Firestore, SendGrid, and the AI agent runners.
+initializes Firebase/Firestore, email service, and the AI agent runners.
 
 All initialized services are exposed as module-level variables for
 import by other modules.
@@ -23,7 +23,6 @@ from firebase_admin import credentials, firestore
 from google.adk import Runner
 from firestore_service import FirestoreSessionService
 
-from sendgrid import SendGridAPIClient
 
 from fastapi import HTTPException
 
@@ -139,7 +138,7 @@ def load_app_config():
     if not from_email:
         logging.warning("FROM_EMAIL environment variable not set. Email notifications will not work.")
     else:
-        # Get SendGrid API key from Secret Manager
+        # Get email app password from Secret Manager
         mail_api_key = access_secret_payload(project_id, 'EMAIL_KEY')
     bucket_name = os.environ.get('BUCKET_NAME',project_id+ '-bucket')    
     gemini_api_key = None

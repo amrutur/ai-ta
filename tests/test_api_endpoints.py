@@ -981,3 +981,178 @@ class TestRateLimitStatusEndpoint:
             assert resp.status_code == 403
         finally:
             self._cleanup(course_handle)
+
+
+# ---------------------------------------------------------------------------
+# /notify_student_grades endpoint
+# ---------------------------------------------------------------------------
+
+class TestNotifyStudentGradesEndpoint:
+
+    def _setup_course(self, instructor_email="instructor@test.com"):
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+        courses[course_handle] = {
+            "instructor_gmail": instructor_email,
+        }
+        return course_handle
+
+    def _cleanup(self, course_handle):
+        from api_server import courses
+        if course_handle in courses:
+            del courses[course_handle]
+
+    def test_requires_auth(self, client):
+        """POST /notify_student_grades without auth should return 401."""
+        resp = client.post(
+            "/notify_student_grades",
+            json={
+                "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                "notebook_id": "hw1", "student_id": "student@test.com",
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_non_instructor_rejected(self, client):
+        """Non-instructor should get 403."""
+        course_handle = self._setup_course(instructor_email="real-instructor@test.com")
+        try:
+            resp = client.post(
+                "/notify_student_grades",
+                json={
+                    "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                    "notebook_id": "hw1", "student_id": "student@test.com",
+                },
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 403
+        finally:
+            self._cleanup(course_handle)
+
+    def test_single_student_email_sent(self, client):
+        """Instructor sends grade notification to a single student."""
+        course_handle = self._setup_course()
+        try:
+            grader_response = {"total_marks": 8, "max_marks": 10, "feedback": "Good work"}
+            with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_response):
+                with patch("api_server.send_email", return_value=True) as mock_send:
+                    resp = client.post(
+                        "/notify_student_grades",
+                        json={
+                            "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                            "notebook_id": "hw1", "student_id": "student@test.com",
+                        },
+                        headers=_auth_header(email="instructor@test.com"),
+                    )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "Sent 1" in data["response"]
+            assert "0 failed" in data["response"]
+            mock_send.assert_called_once()
+            call_args = mock_send.call_args
+            assert call_args[0][2] == "student@test.com"  # to address
+            assert "hw1" in call_args[0][3]  # subject contains notebook_id
+        finally:
+            self._cleanup(course_handle)
+
+    def test_single_student_no_graded_response(self, client):
+        """If student has no graded response, they are skipped."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=None):
+                with patch("api_server.send_email") as mock_send:
+                    resp = client.post(
+                        "/notify_student_grades",
+                        json={
+                            "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                            "notebook_id": "hw1", "student_id": "student@test.com",
+                        },
+                        headers=_auth_header(email="instructor@test.com"),
+                    )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "skipped 1" in data["response"]
+            mock_send.assert_not_called()
+        finally:
+            self._cleanup(course_handle)
+
+    def test_all_students_mixed_results(self, client):
+        """Notify all students: one succeeds, one has no grades, one fails."""
+        course_handle = self._setup_course()
+        try:
+            async def mock_fetch(db, ch, nid, sid):
+                if sid == "student1@test.com":
+                    return {"total_marks": 8, "max_marks": 10}
+                if sid == "student3@test.com":
+                    return {"total_marks": 5, "max_marks": 10}
+                return None  # student2 has no grades
+
+            def mock_send(api_key, from_email, to, subject, body):
+                if to == "student3@test.com":
+                    return False  # simulate failure
+                return True
+
+            with patch("api_server.get_student_list", new_callable=AsyncMock, return_value=["student1@test.com", "student2@test.com", "student3@test.com"]):
+                with patch("api_server.fetch_grader_response", side_effect=mock_fetch):
+                    with patch("api_server.send_email", side_effect=mock_send):
+                        resp = client.post(
+                            "/notify_student_grades",
+                            json={
+                                "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                                "notebook_id": "hw1", "student_id": "all",
+                            },
+                            headers=_auth_header(email="instructor@test.com"),
+                        )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "Sent 1" in data["response"]
+            assert "skipped 1" in data["response"]
+            assert "1 failed" in data["response"]
+        finally:
+            self._cleanup(course_handle)
+
+    def test_email_failure_counted(self, client):
+        """If send_email returns False, it should be counted as failed."""
+        course_handle = self._setup_course()
+        try:
+            grader_response = {"total_marks": 8, "max_marks": 10}
+            with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_response):
+                with patch("api_server.send_email", return_value=False):
+                    resp = client.post(
+                        "/notify_student_grades",
+                        json={
+                            "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                            "notebook_id": "hw1", "student_id": "student@test.com",
+                        },
+                        headers=_auth_header(email="instructor@test.com"),
+                    )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "1 failed" in data["response"]
+            assert "Sent 0" in data["response"]
+        finally:
+            self._cleanup(course_handle)
+
+    def test_no_students_returns_404(self, client):
+        """If 'all' is specified but no students exist, should return 404."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.get_student_list", new_callable=AsyncMock, return_value=[]):
+                resp = client.post(
+                    "/notify_student_grades",
+                    json={
+                        "institution_id": "mit", "term_id": "2025", "course_id": "6.001",
+                        "notebook_id": "hw1", "student_id": "all",
+                    },
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+
+            assert resp.status_code == 404
+        finally:
+            self._cleanup(course_handle)

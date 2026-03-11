@@ -34,8 +34,8 @@ _mock_config.is_production = False
 _mock_config.isactive_eval = True
 _mock_config.isactive_tutor = True
 _mock_config.bucket_name = "test-bucket"
-_mock_config.sendgrid_client = None
-_mock_config.sendgrid_from_email = None
+_mock_config._mail_api_key = None
+_mock_config._from_email = None
 _mock_config.REDIRECT_URI_INDEX = 0
 _mock_config.SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",

@@ -1,16 +1,15 @@
 """
-Email service using SendGrid API.
+Email service using Gmail SMTP.
 """
 
 import logging
-
-#from sendgrid.helpers.mail import Mail, Email, To, Content
 import smtplib
 from email.message import EmailMessage
 
+
 def send_email(mail_api_key, from_email, to, subject, body):
     """
-    Send an email using  GMAIL SMTP.
+    Send an email using Gmail SMTP.
     Returns True if successful, False otherwise.
     """
 
@@ -20,7 +19,7 @@ def send_email(mail_api_key, from_email, to, subject, body):
     msg['To'] = to
     msg.set_content(body)
     try:
-    # Connect to Gmail's SMTP server
+        # Connect to Gmail's SMTP server
         with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
             smtp.starttls()  # Secure the connection
             smtp.login(from_email, mail_api_key)
