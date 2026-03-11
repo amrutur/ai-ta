@@ -16,7 +16,7 @@ GOOGLE_CLOUD_PROECT (should be set to be the project id for the application goog
 PRODUCTION (should be set to 0 for local testing and 1 for production)
 ADMIN_EMAIL (platform administrator email addresses)
 OAUTH_REDIRECT_URI (optional, for development with ngrok - e.g., https://yoursubdomain.ngrok-free.app/callback)
-SENDGRID_FROM_EMAIL (email address to send emails from)
+FROM_EMAIL (Gmail address to send notification emails from; requires EMAIL_KEY in Secret Manager)
 
 In addition a google service account is needed to access the firestore database as
 well as the rubric (the rubric file has to be shared with the service account)

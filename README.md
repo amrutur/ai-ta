@@ -56,6 +56,7 @@ firestore/
 │                       ├── answer_notebook, answer_hash, submitted_at
 │                       ├── total_marks, max_marks, graded_at
 │                       ├── grader_response, graded_json
+│                       ├── email_notified_at
 │
 ├── student_sessions/ (collection — student-agent conversation history)
 │   └── {app_name}/users/{user_email}/sessions/{session_id}/events/...
@@ -80,7 +81,7 @@ firestore/
 - **Tutor & Eval Controls**: Dynamically enable/disable the tutoring and evaluation endpoints per course
 - **Per-Student Rate Limiting**: Configurable sliding-window rate limits per course to manage AI model usage
 - **Batch Grading**: Evaluate multiple student submissions
-- **Email Notifications**: Notify students when grades are ready via SendGrid
+- **Email Notifications**: Notify students when grades are ready via Gmail SMTP
 - **Grade Management**: View student marks lists and detailed grading feedback
 
 ### Technical Features
@@ -94,7 +95,7 @@ firestore/
 - **Dual Authentication**: OAuth 2.0 sessions (browser) and JWT tokens (API/Colab clients)
 - **Per-Student Rate Limiting**: In-memory sliding-window rate limiter configurable per course, with instructor bypass and live config updates
 - **GCS Signed URL Uploads**: Direct browser-to-GCS uploads via signed URLs (bypasses Cloud Run size limits)
-- **SendGrid Integration**: Email delivery for grade notifications
+- **Gmail SMTP Integration**: Email delivery for grade notifications
 - **Cloud Run Deployment**: Scalable, serverless deployment on Google Cloud
 
 ## Prerequisites
@@ -108,7 +109,7 @@ firestore/
   - Vertex AI
   - Cloud Run (for production)
 - OAuth 2.0 credentials
-- SendGrid API key (for email notifications)
+- Gmail app password stored as `EMAIL_KEY` in Secret Manager (for email notifications)
 
 ### For Students
 - Google Colab account
@@ -144,7 +145,7 @@ firestore/
    - OAuth client ID and secret
    - Session signing key
    - Firestore service account private key and key ID
-   - SendGrid API key (optional)
+   - Gmail app password (`EMAIL_KEY`) for email notifications (optional)
    - Gemini API key (optional — uses Vertex AI service account auth if not set)
 
 5. **Run the development server**
@@ -341,7 +342,7 @@ The API supports two authentication methods:
 | `FIRESTORE_PRIVATE_KEY_ID_KEY_NAME` | Yes | Secret Manager key name for Firestore key ID |
 | `FIRESTORE_PRIVATE_KEY_KEY_NAME` | Yes | Secret Manager key name for Firestore private key |
 | `OAUTH_REDIRECT_URI` | No | Custom OAuth redirect URI (for ngrok / Cloud Run) |
-| `SENDGRID_FROM_EMAIL` | No | Sender email for notifications (disables email if unset) |
+| `FROM_EMAIL` | No | Gmail address used to send notifications (disables email if unset) |
 | `GEMINI_API_KEY_NAME` | No | Secret Manager key for Gemini API (uses Vertex AI if unset) |
 | `BUCKET_NAME` | No | GCS bucket name (defaults to `{project_id}-bucket`) |
 | `REGION` | No | GCP region for Vertex AI |
@@ -357,10 +358,10 @@ Secrets are stored in Secret Manager and accessed by the server at startup:
 | Signing secret key | JWT / session signing |
 | Firestore private key ID | Service account authentication |
 | Firestore private key | Service account authentication |
-| `sendgrid-api-key` | SendGrid email delivery (optional) |
+| `EMAIL_KEY` | Gmail app password for SMTP email delivery (optional) |
 | Gemini API key | Direct Gemini API access (optional) |
 
-See [SENDGRID_SETUP.md](./SENDGRID_SETUP.md) for email configuration details.
+See [GMAIL_SETUP.md](./GMAIL_SETUP.md) for email configuration details.
 
 ## Deployment
 
@@ -419,7 +420,7 @@ ai-ta/
 │   ├── rag.py               # RAG pipeline (PDF chunking, embedding, retrieval)
 │   ├── drive_utils.py       # Google Drive / Colab notebook utilities
 │   ├── storage_utils.py     # GCS upload and signed URL utilities
-│   ├── email_service.py     # SendGrid email service
+│   ├── email_service.py     # Gmail SMTP email service
 │   └── aita_exceptions.py   # Custom exception classes
 ├── tests/
 │   ├── conftest.py          # Pytest configuration and shared fixtures
@@ -434,7 +435,7 @@ ai-ta/
 ├── Makefile
 ├── .env.example             # Environment variables template
 ├── DEPLOYMENT.md            # Cloud Run deployment guide
-├── SENDGRID_SETUP.md        # Email configuration guide
+├── GMAIL_SETUP.md           # Email configuration guide
 └── README.md
 ```
 
@@ -492,7 +493,7 @@ Logs are written to:
 ## Documentation
 
 - [Deployment Guide](./DEPLOYMENT.md) — Cloud Run deployment instructions
-- [SendGrid Setup](./SENDGRID_SETUP.md) — Email notification configuration
+- [Gmail SMTP Setup](./GMAIL_SETUP.md) — Email notification configuration
 
 ## Contributing
 
@@ -508,7 +509,6 @@ Built with significant assistance from Google's Gemini AI and leveraging:
 - Google Agent Development Kit (ADK)
 - Google Generative AI (Gemini 2.5 Pro)
 - FastAPI
-- SendGrid
 - Google Cloud Platform (Firestore, Cloud Storage, Vertex AI, Cloud Run)
 
 ---

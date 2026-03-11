@@ -130,7 +130,7 @@ gcloud run deploy $SERVICE_NAME \
   --set-env-vars "PRODUCTION=1" \
   --set-env-vars "FIRESTORE_DATABASE_ID=your-database-id" \
   --set-env-vars "ADMIN_EMAILS=admin@example.com" \
-  --set-env-vars "SENDGRID_FROM_EMAIL=noreply@yourdomain.com" \
+  --set-env-vars "FROM_EMAIL=your-gmail@gmail.com" \
   --set-env-vars "OAUTH_CLIENT_ID_KEY_NAME=oauth-client-id" \
   --set-env-vars "OAUTH_CLIENT_SECRET_KEY_NAME=oauth-client-secret" \
   --set-env-vars "SIGNING_SECRET_KEY_NAME=signing-secret" \
@@ -176,20 +176,21 @@ https://<your-service-name>-622756405105.asia-south1.run.app
    ```
 5. Click **Save**
 
-## Step 6: Configure SendGrid for Email Notifications (Optional but Recommended)
+## Step 6: Configure Gmail SMTP for Email Notifications (Optional but Recommended)
 
-To enable email notifications for graded assignments, you need to set up SendGrid.
-
-The SendGrid API key should already be stored in Secret Manager as `sendgrid-api-key`.
+To enable email notifications for graded assignments, you need a Gmail account with an app password.
 
 Quick steps:
-1. Verify the secret exists: `gcloud secrets describe sendgrid-api-key --project=$PROJECT_ID`
-2. Set `SENDGRID_FROM_EMAIL` environment variable (already done in Step 4)
-3. Verify the sender email in SendGrid dashboard
+1. Create a Gmail app password (see [GMAIL_SETUP.md](GMAIL_SETUP.md))
+2. Store it in Secret Manager as `EMAIL_KEY`:
+   ```bash
+   echo -n "your-app-password" | gcloud secrets create EMAIL_KEY --project=$PROJECT_ID --data-file=-
+   ```
+3. Set the `FROM_EMAIL` environment variable to the Gmail address (already done in Step 4)
 
 If you skip this step, the application will work but email notifications won't be sent.
 
-See [SENDGRID_SETUP.md](SENDGRID_SETUP.md) for complete setup instructions.
+See [GMAIL_SETUP.md](GMAIL_SETUP.md) for complete setup instructions.
 
 ## Step 7: Test Your Deployment
 
@@ -228,7 +229,7 @@ gcloud run deploy $SERVICE_NAME \
 | `PRODUCTION` | Set to 1 for production | `1` |
 | `FIRESTORE_DATABASE_ID` | Firestore database ID | `(default)` |
 | `ADMIN_EMAILS` | Comma-separated platform admin emails | `admin@example.com` |
-| `SENDGRID_FROM_EMAIL` | Email address to send from (must be verified in SendGrid) | `noreply@yourdomain.com` |
+| `FROM_EMAIL` | Gmail address used to send email notifications | `your-gmail@gmail.com` |
 | `OAUTH_REDIRECT_URI` | Optional custom redirect URI | Only for dev with ngrok |
 | Secret key environment variables (point to Secret Manager secrets) ||
 | `OAUTH_CLIENT_ID_KEY_NAME` | Name of secret containing OAuth client ID | `oauth-client-id` |
