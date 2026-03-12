@@ -224,6 +224,142 @@ class TestEvalEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# /regrade_answer endpoint
+# ---------------------------------------------------------------------------
+
+class TestRegradeAnswerEndpoint:
+
+    REGRADE_JSON = {
+        "qnum": 1, "notebook_id": "hw1", "student_id": "student@test.com",
+        "course_id": "6.001", "term_id": "2025", "institution_id": "mit",
+        "student_contends": "I believe my answer is correct because...",
+    }
+
+    def _setup_course(self, instructor_email="instructor@test.com"):
+        from api_server import courses
+        from database import make_course_handle
+
+        course_handle = make_course_handle("mit", "2025", "6.001")
+        courses[course_handle] = {
+            "instructor_gmail": instructor_email,
+            "hw1": {
+                "max_marks": 20.0,
+                "questions": {
+                    "1": {"question": "What is 2+2?", "marks": 10.0},
+                    "2": {"question": "What is 3+3?", "marks": 10.0},
+                },
+                "answers": {
+                    "1": [{"percent": "100", "component": "4"}],
+                    "2": [{"percent": "100", "component": "6"}],
+                },
+            },
+        }
+        return course_handle
+
+    def _cleanup(self, course_handle):
+        from api_server import courses
+        if course_handle in courses:
+            del courses[course_handle]
+
+    def test_requires_auth(self, client):
+        """POST /regrade_answer without auth should return 401."""
+        resp = client.post("/regrade_answer", json=self.REGRADE_JSON)
+        assert resp.status_code == 401
+
+    def test_non_instructor_rejected(self, client):
+        """Non-instructor should get 403."""
+        course_handle = self._setup_course(instructor_email="prof@test.com")
+        try:
+            resp = client.post(
+                "/regrade_answer", json=self.REGRADE_JSON,
+                headers=_auth_header(email="student@test.com"),
+            )
+            assert resp.status_code == 403
+        finally:
+            self._cleanup(course_handle)
+
+    def test_regrade_success_with_contention(self, client):
+        """Instructor regrades a question with student contention."""
+        course_handle = self._setup_course()
+        try:
+            student_answers = {"1": [{"component": "4"}], "2": [{"component": "6"}]}
+            grader_resp = {
+                "student_id": "student@test.com",
+                "total_marks": 15, "max_marks": 20,
+                "feedback": {
+                    "1": {"marks": 5.0, "response": "Partially correct."},
+                    "2": {"marks": 10.0, "response": "Correct."},
+                },
+            }
+
+            with patch("api_server.get_student_notebook_answers", new_callable=AsyncMock, return_value=student_answers):
+                with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_resp):
+                    with patch("api_server.retrieve_context", new_callable=AsyncMock, return_value="course material"):
+                        with patch("api_server.score_question", new_callable=AsyncMock, return_value=(8.0, "Regraded: mostly correct.")) as mock_score:
+                            with patch("api_server.update_marks", new_callable=AsyncMock) as mock_update:
+                                resp = client.post(
+                                    "/regrade_answer", json=self.REGRADE_JSON,
+                                    headers=_auth_header(email="instructor@test.com"),
+                                )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["marks"] == 8.0
+            assert "Regraded" in data["response"]
+
+            # Verify score_question was called with augmented answer including contention
+            call_args = mock_score.call_args
+            rubric_answer_arg = call_args[0][2]
+            assert "{agent's grading}" in rubric_answer_arg
+            assert "Partially correct." in rubric_answer_arg
+            assert "{student's contention}" in rubric_answer_arg
+            assert "I believe my answer is correct" in rubric_answer_arg
+
+            # Verify update_marks was called with recalculated total (8 + 10 = 18)
+            update_call = mock_update.call_args
+            assert update_call[0][3] == "hw1"  # notebook_id
+            assert update_call[0][4] == 18.0  # total_marks (regraded Q1=8 + Q2=10)
+        finally:
+            self._cleanup(course_handle)
+
+    def test_regrade_no_answers_returns_404(self, client):
+        """If student has no submitted answers, return 404."""
+        course_handle = self._setup_course()
+        try:
+            with patch("api_server.get_student_notebook_answers", new_callable=AsyncMock, return_value=None):
+                resp = client.post(
+                    "/regrade_answer", json=self.REGRADE_JSON,
+                    headers=_auth_header(email="instructor@test.com"),
+                )
+            assert resp.status_code == 404
+            assert "No submitted answers" in resp.json()["detail"]
+        finally:
+            self._cleanup(course_handle)
+
+    def test_regrade_skipped_when_do_regrade_false(self, client):
+        """With do_regrade=False, already-graded question should return 409."""
+        course_handle = self._setup_course()
+        try:
+            student_answers = {"1": [{"component": "4"}]}
+            grader_resp = {
+                "student_id": "student@test.com",
+                "total_marks": 5, "max_marks": 20,
+                "feedback": {"1": {"marks": 5.0, "response": "Partially correct."}},
+            }
+
+            regrade_json = {**self.REGRADE_JSON, "do_regrade": False}
+
+            with patch("api_server.get_student_notebook_answers", new_callable=AsyncMock, return_value=student_answers):
+                with patch("api_server.fetch_grader_response", new_callable=AsyncMock, return_value=grader_resp):
+                    resp = client.post(
+                        "/regrade_answer", json=regrade_json,
+                        headers=_auth_header(email="instructor@test.com"),
+                    )
+            assert resp.status_code == 409
+        finally:
+            self._cleanup(course_handle)
+
+
 # /grade_notebook endpoint
 # ---------------------------------------------------------------------------
 

@@ -162,6 +162,20 @@ class GradeNotebookRequest(BaseModel):
     institution_id: str
     do_regrade: bool = False
 
+class RegradeAnswerRequest(BaseModel):
+    qnum: int
+    notebook_id: str
+    student_id: str
+    course_id: str
+    term_id: str
+    institution_id: str
+    do_regrade: bool = True
+    student_contends: str = ""
+
+class RegradeAnswerResponse(BaseModel):
+    response: str
+    marks: float
+
 class BuildCourseIndexRequest(BaseModel):
     course_id: str
     term_id: str

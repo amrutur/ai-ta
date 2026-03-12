@@ -60,6 +60,7 @@ from models import (
     FetchMarksListRequest, FetchMarksListResponse,
     AddRubricRequest, AddRubricResponse,
     GradeNotebookRequest,
+    RegradeAnswerRequest, RegradeAnswerResponse,
     BuildCourseIndexRequest, BuildCourseIndexResponse,
     UpdateCourseConfigRequest, UpdateCourseConfigResponse,
     UpdateGlobalConfigRequest, UpdateGlobalConfigResponse
@@ -692,6 +693,122 @@ async def grade(query_body: GradeRequest, request: Request):
     except Exception as e:
         # By logging the exception with its traceback, you can see the root cause in your server logs.
         logging.error("An exception occurred during query processing: %s", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+@app.post("/regrade_answer", response_model=RegradeAnswerResponse)
+async def regrade_answer(query_body: RegradeAnswerRequest, request: Request):
+    '''Regrade a specific question for a student, optionally incorporating the student's contention.
+
+    Fetches the student's answer, rubric, and the previous grader response from the database,
+    then re-scores the question with the contention context included.
+    Only accessible to instructors/admins.
+    '''
+
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors can use the regrade_answer endpoint.")
+
+    notebook_id = query_body.notebook_id
+    student_id = query_body.student_id
+    qnum_str = str(query_body.qnum)
+
+    # Validate rubric data exists
+    if notebook_id not in courses[course_handle]:
+        raise HTTPException(status_code=404, detail=f"Rubric notebook data not found for notebook '{notebook_id}' in course '{course_handle}'. Please add the rubric first.")
+
+    rubric_data = courses[course_handle].get(notebook_id)
+    rubric_questions = rubric_data.get('questions', {})
+    rubric_answers = rubric_data.get('answers', {})
+    max_marks_total = rubric_data.get('max_marks', 0.0)
+
+    rubric_question_data = rubric_questions.get(qnum_str, {})
+    rubric_question = rubric_question_data.get('question', '')
+    if not rubric_question:
+        raise HTTPException(status_code=404, detail=f"No rubric question found for Q{qnum_str}.")
+
+    rubric_question_marks = rubric_question_data.get('marks', 10.0)
+    rubric_answer = rubric_answers.get(qnum_str, '')
+    rubric_answer_str = " ".join(
+        f"({float(a.get('percent'))/100.0*rubric_question_marks}) {a.get('component', '')}"
+        for a in rubric_answer
+    )
+
+    try:
+        # Fetch student's answers and existing grader response
+        answers = await get_student_notebook_answers(config.db, course_handle, student_id, notebook_id)
+        if not answers:
+            raise HTTPException(status_code=404, detail=f"No submitted answers found for student '{student_id}' notebook '{notebook_id}'.")
+
+        student_answer = answers.get(qnum_str)
+        student_answer_str = " ".join(
+            f"{a.get('component', '')}"
+            for a in student_answer
+        ) if student_answer else "No answer."
+
+        # Fetch existing grader response for context
+        grader_response = await fetch_grader_response(config.db, course_handle, notebook_id, student_id)
+
+        # Check if already graded — skip unless do_regrade is True
+        if not query_body.do_regrade and grader_response:
+            existing_feedback = grader_response.get('feedback', {})
+            existing_q = existing_feedback.get(qnum_str)
+            if existing_q:
+                raise HTTPException(status_code=409, detail=f"Q{qnum_str} already graded for student '{student_id}'. Set do_regrade=true to regrade.")
+
+        # Build the augmented rubric answer with previous grading + student contention
+        augmented_answer = rubric_answer_str
+        if grader_response:
+            existing_feedback = grader_response.get('feedback', {})
+            prev_q_response = existing_feedback.get(qnum_str, {})
+            if prev_q_response:
+                prev_response_text = prev_q_response.get('response', '')
+                augmented_answer += f"\n\n{{agent's grading}}\n{prev_response_text}"
+
+        if query_body.student_contends:
+            augmented_answer += f"\n\n{{student's contention}}\n{query_body.student_contends}"
+
+        # RAG retrieval + scoring
+        course_model = courses[course_handle].get('model')
+        runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
+
+        rag_material = await retrieve_context(course_handle, rubric_question)
+        marks, response_text = await score_question(
+            rubric_question, student_answer_str, augmented_answer,
+            runner, config.instructor_session_service, student_id,
+            course_material=rag_material
+        )
+        logging.info(f"Regraded Q{qnum_str} for {student_id}: {marks} marks")
+
+        # Update the grader_response for this question in the DB
+        existing_graded = {}
+        if grader_response and grader_response.get('feedback'):
+            existing_graded = {k: v for k, v in grader_response['feedback'].items()}
+
+        existing_graded[qnum_str] = {'marks': marks, 'response': response_text}
+
+        # Recalculate total marks across all questions
+        total_marks = sum(q.get('marks', 0.0) for q in existing_graded.values())
+
+        await update_marks(config.db, course_handle, student_id, notebook_id, total_marks, max_marks_total, existing_graded)
+
+        return RegradeAnswerResponse(
+            response=response_text,
+            marks=marks
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error("An exception occurred during regrade_answer: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
