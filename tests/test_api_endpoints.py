@@ -320,14 +320,17 @@ class TestRegradeAnswerEndpoint:
             assert update_call[0][3] == "hw1"  # notebook_id
             assert update_call[0][4] == 18.0  # total_marks (regraded Q1=8 + Q2=10)
 
-            # Verify the stored response preserves old response + contention + new response
+            # Verify the stored response: regraded first, then contention, then old marks/response
             graded_dict = update_call[0][6]
             stored_response = graded_dict["1"]["response"]
-            assert "Partially correct." in stored_response  # old response preserved
+            assert stored_response.startswith("{regraded response}")
+            assert "Regraded: mostly correct." in stored_response
             assert "{student's contention}" in stored_response
             assert "I believe my answer is correct" in stored_response
-            assert "{regraded response}" in stored_response
-            assert "Regraded: mostly correct." in stored_response
+            assert "[previous marks]=5.0" in stored_response
+            assert "[previous response]=Partially correct." in stored_response
+            # Verify ordering: regraded appears before previous
+            assert stored_response.index("{regraded response}") < stored_response.index("[previous marks]")
         finally:
             self._cleanup(course_handle)
 
