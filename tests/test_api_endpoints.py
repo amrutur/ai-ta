@@ -319,6 +319,15 @@ class TestRegradeAnswerEndpoint:
             update_call = mock_update.call_args
             assert update_call[0][3] == "hw1"  # notebook_id
             assert update_call[0][4] == 18.0  # total_marks (regraded Q1=8 + Q2=10)
+
+            # Verify the stored response preserves old response + contention + new response
+            graded_dict = update_call[0][6]
+            stored_response = graded_dict["1"]["response"]
+            assert "Partially correct." in stored_response  # old response preserved
+            assert "{student's contention}" in stored_response
+            assert "I believe my answer is correct" in stored_response
+            assert "{regraded response}" in stored_response
+            assert "Regraded: mostly correct." in stored_response
         finally:
             self._cleanup(course_handle)
 

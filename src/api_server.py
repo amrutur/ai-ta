@@ -793,7 +793,15 @@ async def regrade_answer(query_body: RegradeAnswerRequest, request: Request):
         if grader_response and grader_response.get('feedback'):
             existing_graded = {k: v for k, v in grader_response['feedback'].items()}
 
-        existing_graded[qnum_str] = {'marks': marks, 'response': response_text}
+        # Preserve the full history: old response + student contention + new response
+        prev_q = existing_graded.get(qnum_str, {})
+        prev_response = prev_q.get('response', '')
+        combined_response = prev_response
+        if query_body.student_contends:
+            combined_response += f"\n\n{{student's contention}}\n{query_body.student_contends}"
+        combined_response += f"\n\n{{regraded response}}\n{response_text}"
+
+        existing_graded[qnum_str] = {'marks': marks, 'response': combined_response}
 
         # Recalculate total marks across all questions
         total_marks = sum(q.get('marks', 0.0) for q in existing_graded.values())
