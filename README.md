@@ -39,12 +39,14 @@ firestore/
 │       ├── ta_name, ta_email, ta_gmail (optional)
 │       ├── start_date, end_date, created_at, last_updated
 │       ├── folder_name (GCS path)
-│       ├── isactive_tutor, isactive_eval (feature flags)
+│       ├── isactive_tutor (feature flag — tutoring toggle)
 │       ├── student_rate_limit, student_rate_limit_window (per-student rate limiting)
+│       ├── ai_model, instructor_prompt, tutor_prompt, scoring_prompt (course-specific AI config)
 │       │
 │       ├── Notebooks/ (subcollection — rubrics & instructor content)
 │       │   └── {notebook_id}/
 │       │       ├── max_marks, context, questions, answers, outputs
+│       │       ├── isactive_eval (per-notebook evaluation toggle)
 │       │       └── rag_chunks/ (subcollection — vector embeddings)
 │       │           └── {auto-id}/ (source_file, chunk_index, text, embedding)
 │       │
@@ -58,11 +60,11 @@ firestore/
 │                       ├── grader_response, graded_json
 │                       ├── email_notified_at
 │
-├── student_sessions/ (collection — student-agent conversation history)
-│   └── {app_name}/users/{user_email}/sessions/{session_id}/events/...
-│
-└── instructor_sessions/ (collection — instructor-agent conversation history)
-    └── {app_name}/users/{user_email}/sessions/{session_id}/events/...
+│       ├── student_sessions/ (subcollection — student-agent conversation history)
+│       │   └── {app_name}/users/{user_email}/sessions/{session_id}/events/...
+│       │
+│       └── instructor_sessions/ (subcollection — instructor-agent conversation history)
+│           └── {app_name}/users/{user_email}/sessions/{session_id}/events/...
 ```
 
 ## Key Features
@@ -78,9 +80,12 @@ firestore/
 - **Rubric Management**: Upload scoring rubrics to guide the AI grading agent
 - **Course Materials Upload**: Drag-and-drop browser interface for uploading PDFs to GCS
 - **RAG Index Building**: Build vector search indices over uploaded course materials
-- **Tutor & Eval Controls**: Dynamically enable/disable the tutoring and evaluation endpoints per course
+- **Tutor & Eval Controls**: Dynamically enable/disable the tutoring endpoint per course and evaluation per notebook
 - **Per-Student Rate Limiting**: Configurable sliding-window rate limits per course to manage AI model usage
-- **Batch Grading**: Evaluate multiple student submissions
+- **Batch Grading**: Evaluate multiple student submissions via `/grade_notebook` (supports regrading with `do_regrade`)
+- **Per-Question Regrading**: Regrade individual questions with optional student contention via `/regrade_answer`
+- **Course File Management**: List uploaded course files in GCS via `/list_course_files`
+- **Course-Specific AI Configuration**: Configure AI model and custom prompts per course via Firestore
 - **Email Notifications**: Notify students when grades are ready via Gmail SMTP
 - **Grade Management**: View student marks lists and detailed grading feedback
 
@@ -91,7 +96,8 @@ firestore/
   - **Student Tutor Agent**: Provides interactive tutoring and feedback to students
   - **Scoring Agent**: Evaluates submissions against rubrics with component-based scoring
 - **RAG Pipeline**: Retrieval-Augmented Generation using Vertex AI embeddings (`text-embedding-004`) and Firestore vector search for grounding responses in course materials
-- **Custom Firestore Session Service**: Async session persistence with app-level and user-level state, event subcollections
+- **Custom Firestore Session Service**: Async session persistence with app-level and user-level state, event subcollections, isolated per course
+- **Course-Specific AI Configuration**: Per-course AI model selection and custom agent prompts stored in Firestore
 - **Dual Authentication**: OAuth 2.0 sessions (browser) and JWT tokens (API/Colab clients)
 - **Per-Student Rate Limiting**: In-memory sliding-window rate limiter configurable per course, with instructor bypass and live config updates
 - **GCS Signed URL Uploads**: Direct browser-to-GCS uploads via signed URLs (bypasses Cloud Run size limits)
@@ -302,7 +308,10 @@ The API supports two authentication methods:
 | `/upload_rubric` | POST | `AddRubricRequest` | Upload rubric (questions, answers, marks, context) |
 | `/fetch_marks_list` | POST | `FetchMarksListRequest` | Fetch all student marks for a notebook |
 | `/fetch_grader_response` | POST | `FetchGradedRequest` | Fetch grading feedback for a specific student |
+| `/grade_notebook` | POST | `GradeNotebookRequest` | Batch-grade a notebook for one or all students (supports `do_regrade`) |
+| `/regrade_answer` | POST | `RegradeAnswerRequest` | Regrade a single question with optional student contention |
 | `/notify_student_grades` | POST | `NotifyGradedRequest` | Send grade notification email to a student |
+| `/list_course_files` | POST | `ListCourseFilesRequest` | List files in a course's GCS storage folder |
 | `/upload_course_materials` | GET | — | Drag-and-drop file upload page for course PDFs |
 | `/validate_course_access` | GET | Query params | Validate instructor access to a course |
 | `/get_upload_url` | POST | JSON body | Generate signed GCS URL for direct browser upload |
@@ -421,15 +430,22 @@ ai-ta/
 │   ├── drive_utils.py       # Google Drive / Colab notebook utilities
 │   ├── storage_utils.py     # GCS upload and signed URL utilities
 │   ├── email_service.py     # Gmail SMTP email service
-│   └── aita_exceptions.py   # Custom exception classes
+│   ├── aita_exceptions.py   # Custom exception classes
+│   └── exceptions.py        # Base exception hierarchy
 ├── tests/
-│   ├── conftest.py          # Pytest configuration and shared fixtures
-│   ├── test_api_endpoints.py
-│   ├── test_database.py
-│   ├── test_agent_service.py
-│   ├── test_models.py
-│   ├── test_rag.py
-│   └── test_rate_limiter.py
+│   ├── conftest.py              # Pytest configuration and shared fixtures
+│   ├── test_api_endpoints.py    # API integration tests
+│   ├── test_agent_service.py    # Agent execution tests
+│   ├── test_auth.py             # Auth logic tests
+│   ├── test_database.py         # Database operations tests
+│   ├── test_drive_utils.py      # Google Drive utility tests
+│   ├── test_email_service.py    # Email service tests
+│   ├── test_exceptions.py       # Exception tests
+│   ├── test_firestore_service.py # Session service tests
+│   ├── test_models.py           # Pydantic model tests
+│   ├── test_rag.py              # RAG pipeline tests
+│   ├── test_rate_limiter.py     # Rate limiter tests
+│   └── test_storage_utils.py    # GCS utility tests
 ├── requirements.txt
 ├── Dockerfile
 ├── Makefile
@@ -441,18 +457,18 @@ ai-ta/
 
 ### AI Agents
 
-The system uses three specialized agents built with Google ADK:
+The system uses three specialized agents built with Google ADK. The AI model defaults to `gemini-2.5-pro` but can be configured per course via Firestore (using the `ai_model` field in the course document). Custom agent prompts can also be set per course.
 
 1. **Instructor Assistant Agent** (`instructor_assist_agent`)
-   - Model: `gemini-2.5-pro`
+   - Model: `gemini-2.5-pro` (configurable per course)
    - Purpose: Assists instructors with content review, question creation, rubric checking, and rubric answer generation
 
 2. **Student Tutor Agent** (`ai_tutor_agent`)
-   - Model: `gemini-2.5-pro`
+   - Model: `gemini-2.5-pro` (configurable per course)
    - Purpose: Interactive tutoring — evaluates student answers against rubrics and course materials, provides feedback and hints
 
 3. **Scoring Agent** (`ai_scoring_agent`)
-   - Model: `gemini-2.5-pro`
+   - Model: `gemini-2.5-pro` (configurable per course)
    - Purpose: Automated grading — component-based scoring with partial credit, matches student answers against rubric components
 
 ### RAG Pipeline

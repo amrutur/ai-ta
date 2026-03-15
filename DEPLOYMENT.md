@@ -38,7 +38,7 @@ Create a file to store your production environment variable values (DO NOT commi
 
 ```bash
 # .env (DO NOT COMMIT)
-ADMIN_EMAILS=admin@example.com
+ADMIN_EMAIL=admin@example.com
 GOOGLE_CLOUD_PROJECT=your_project_name
 SERVICE_ACCOUNT_EMAIL=email_id@project_id.iam.gserviceaccount.com
 FIRESTORE_CLIENT_ID=<id>
@@ -129,7 +129,7 @@ gcloud run deploy $SERVICE_NAME \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
   --set-env-vars "PRODUCTION=1" \
   --set-env-vars "FIRESTORE_DATABASE_ID=your-database-id" \
-  --set-env-vars "ADMIN_EMAILS=admin@example.com" \
+  --set-env-vars "ADMIN_EMAIL=admin@example.com" \
   --set-env-vars "FROM_EMAIL=your-gmail@gmail.com" \
   --set-env-vars "OAUTH_CLIENT_ID_KEY_NAME=oauth-client-id" \
   --set-env-vars "OAUTH_CLIENT_SECRET_KEY_NAME=oauth-client-secret" \
@@ -228,7 +228,7 @@ gcloud run deploy $SERVICE_NAME \
 | `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID | `ai-ta` |
 | `PRODUCTION` | Set to 1 for production | `1` |
 | `FIRESTORE_DATABASE_ID` | Firestore database ID | `(default)` |
-| `ADMIN_EMAILS` | Comma-separated platform admin emails | `admin@example.com` |
+| `ADMIN_EMAIL` | Platform administrator email | `admin@example.com` |
 | `FROM_EMAIL` | Gmail address used to send email notifications | `your-gmail@gmail.com` |
 | `OAUTH_REDIRECT_URI` | Optional custom redirect URI | Only for dev with ngrok |
 | Secret key environment variables (point to Secret Manager secrets) ||
