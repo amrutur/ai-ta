@@ -232,7 +232,7 @@ Students install the client package in their Colab notebooks:
 
 4. **Upload a rubric**
 
-   Use the `/upload_rubric` endpoint to save question rubrics (questions, answers, marks, context) for a notebook.
+   Use the `/upload_rubric` endpoint to save question rubrics (questions, answers, marks, context) for a notebook. See below and examples folder for more info on developing colab notebooks as homeworks or quizzes
 
 5. **Enable tutoring and evaluation**
    ```
@@ -268,6 +268,66 @@ Students install the client package in their Colab notebooks:
    ```python
    cgc.notify_student_grades(...)
    ```
+
+9. **Developing homework/quiz colab notebooks**
+
+Set the AI-TA-URL variable to point to your AI-TA server.
+
+Set the course_id, term_id, institution_id to be appropriate strings so that it can uniquely identify this course in your institution. The default values are for IISc.
+
+Each question cell starts with the line:
+
+star star Qnum: marks star star
+
+which indicates the question number and the marks for this question
+
+The question text will usually be a single question cell.
+
+After the question cell, have one text cell with the line
+
+hash hash Ans (see example below)
+
+This can be followed by one or more answer cells - which can be code or text cells.
+
+If the cell with the answer tag gets deleted, the client will be unable to get hold of the answer cells to send to the grader.
+
+While you are developing your quiz notebook, you can follow the answer cell with a text cell starting with the line
+
+star star Chat with TA
+
+and include your dialogue for the TA to get their inputs. (for example, check this question and answer)
+
+Following that will be the cell to make a call to the TA with the line, ta.show_teaching_assist_button. The second parameter to this function is the question number - which you need to change to match with the question number.
+
+For homework notebooks, you can have multiple cells either in the beginning or in between question-answer cells - which can serve to provide additional context/learning material. These
+are for the students to study and understand and could be used to help with the for follow on questions. The context is used auto-regressively by the tutor to provide guidance to the student on any question. i.e. the context from the beginning of the notebook uptill the question is used. The tutor also uses its own background knowledge as well as any RAG material.
+
+**IMPORTANT NOTE TO INSTRUCTORS**
+
+1. Once you are done developing the notebook, you can upload this notebook as a rubric using the ta.upload_rubric function (in the second to last cell of this notebook)
+
+2. Make a copy of this notebook and in the copy
+
+a) remove the appropriate answer content (for example pieces of code, where you want the student to provide answers), or text pieces or entire text in the answer cells where you want the stdt to provide answers.
+
+b) If you are releasing this as a homework, you can keep the chat with TA cell  as it will help the student to interact with the TA and arrive at an answer.
+
+c) for a notebook as a homework, you can choose to not allocate any marks to a question - in which case it will default to 10 marks.
+
+d) you can choose to allocate marks to various answer components by following the format below (each component is preceded with a hash percentage-value% for that component.)
+
+e) if you are releasing as a quiz, you can delete the chat with ta cells.
+
+f) delete the cell with the ta.upload_rubric
+
+g) keep the cell with ta.submit_eval_button.
+
+h) you can delete this preamble for the student.
+
+3. share the link of the copied/edited quiz/homework notebook with the students. they need to make their own copy and work on that.
+
+4. authentication: the system relies on Single sign on authentication - either with gmail or your institutional email system - provided they offer a SSO service which google can connect to.
+
 
 ## API Endpoints
 
@@ -521,7 +581,7 @@ See [LICENSE](./LICENSE) file for details.
 
 ## Acknowledgments
 
-Built with significant assistance from Google's Gemini AI and leveraging:
+Built with significant assistance from Claude's Sonnet 4.6 for code development and Google's Gemini AI for general info and leveraging:
 - Google Agent Development Kit (ADK)
 - Google Generative AI (Gemini 2.5 Pro)
 - FastAPI
