@@ -232,3 +232,11 @@ class UpdateGlobalConfigRequest(BaseModel):
 class UpdateGlobalConfigResponse(BaseModel):
     updated: Dict[str, Any]
 
+class ListCourseFilesRequest(BaseModel):
+    course_id: str
+    term_id: str
+    institution_id: str
+
+class ListCourseFilesResponse(BaseModel):
+    files: List[Dict[str, Any]]
+

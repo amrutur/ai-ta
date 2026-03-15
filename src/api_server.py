@@ -63,7 +63,8 @@ from models import (
     RegradeAnswerRequest, RegradeAnswerResponse,
     BuildCourseIndexRequest, BuildCourseIndexResponse,
     UpdateCourseConfigRequest, UpdateCourseConfigResponse,
-    UpdateGlobalConfigRequest, UpdateGlobalConfigResponse
+    UpdateGlobalConfigRequest, UpdateGlobalConfigResponse,
+    ListCourseFilesRequest, ListCourseFilesResponse
 )
 from auth import (
     create_jwt_token,
@@ -96,7 +97,7 @@ from database import (
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from email_service import send_email
-from storage_utils import upload_blob, generate_signed_upload_url
+from storage_utils import upload_blob, generate_signed_upload_url, list_blobs
 from rag import build_course_index, retrieve_context
 import agent
 from rate_limiter import student_rate_limiter
@@ -2099,6 +2100,45 @@ async def get_upload_url(request: Request):
         logging.error(f"Unexpected error in get_upload_url: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}")
+
+
+@app.post("/list_course_files", response_model=ListCourseFilesResponse)
+async def list_course_files_api(query_body: ListCourseFilesRequest, request: Request):
+    '''
+    List all files in the GCS folder for a course.
+    Only accessible to course instructors or platform admins.
+    '''
+    try:
+        user = get_current_user(request)
+
+        course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+        user_gmail = user.get('email', '').lower()
+        if not is_authorized(user_gmail, course_handle):
+            raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+
+        if course_handle not in courses:
+            raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
+
+        folder_name = courses[course_handle].get('folder_name', '')
+        if not folder_name:
+            raise HTTPException(status_code=500, detail="Course folder not configured")
+
+        parts = folder_name.split('/', 1)
+        bucket_name = parts[0]
+        prefix = parts[1] if len(parts) > 1 else ''
+
+        files = await list_blobs(bucket_name, prefix)
+        logging.info(f"Instructor {user_gmail} listed {len(files)} files for course {course_handle}")
+
+        return ListCourseFilesResponse(files=files)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error in list_course_files: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to list course files: {str(e)}")
 
 
 @app.post("/build_course_index", response_model=BuildCourseIndexResponse)
