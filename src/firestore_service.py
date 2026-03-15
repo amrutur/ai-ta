@@ -30,22 +30,39 @@ logger = logging.getLogger(__name__)
 class FirestoreSessionService(BaseSessionService):
     """Firestore-backed session service compatible with Google ADK Runner.
 
+    Sessions are stored as sub-collections under the course document so that
+    each course has its own isolated session data::
+
+        courses/{course_handle}/{collection}/{app_name}/users/{user_id}/sessions/{session_id}
+
     Args:
         db: An async Firestore client instance.
-        collection: The root Firestore collection for storing sessions.
-            Defaults to "agent_sessions".
+        collection: The session collection name (e.g. "student_sessions",
+            "instructor_sessions").  Defaults to "agent_sessions".
+        course_handle: The course identifier whose document in the ``courses``
+            collection serves as the parent for all session data.
     """
 
-    def __init__(self, db: AsyncClient, collection: str = "agent_sessions"):
+    def __init__(self, db: AsyncClient, collection: str = "agent_sessions",
+                 course_handle: str = ""):
         self.db = db
         self.collection = collection
+        self.course_handle = course_handle
 
     # ---- internal helpers ----
+
+    def _course_root(self):
+        """Return the collection reference scoped under the course document."""
+        return (
+            self.db.collection("courses")
+            .document(self.course_handle)
+            .collection(self.collection)
+        )
 
     def _session_ref(self, app_name: str, user_id: str, session_id: str):
         """Return a document reference for a session."""
         return (
-            self.db.collection(self.collection)
+            self._course_root()
             .document(app_name)
             .collection("users")
             .document(user_id)
@@ -60,7 +77,7 @@ class FirestoreSessionService(BaseSessionService):
     def _app_state_ref(self, app_name: str):
         """Return a document reference for app-level state."""
         return (
-            self.db.collection(self.collection)
+            self._course_root()
             .document(app_name)
             .collection("_meta")
             .document("app_state")
@@ -69,7 +86,7 @@ class FirestoreSessionService(BaseSessionService):
     def _user_state_ref(self, app_name: str, user_id: str):
         """Return a document reference for user-level state."""
         return (
-            self.db.collection(self.collection)
+            self._course_root()
             .document(app_name)
             .collection("users")
             .document(user_id)
@@ -226,7 +243,7 @@ class FirestoreSessionService(BaseSessionService):
         if user_id:
             # List sessions for a specific user
             sessions_ref = (
-                self.db.collection(self.collection)
+                self._course_root()
                 .document(app_name)
                 .collection("users")
                 .document(user_id)
@@ -246,14 +263,14 @@ class FirestoreSessionService(BaseSessionService):
         else:
             # List all users' sessions — enumerate user documents
             users_ref = (
-                self.db.collection(self.collection)
+                self._course_root()
                 .document(app_name)
                 .collection("users")
             )
             async for user_doc in users_ref.stream():
                 uid = user_doc.id
                 sessions_ref = (
-                    self.db.collection(self.collection)
+                    self._course_root()
                     .document(app_name)
                     .collection("users")
                     .document(uid)

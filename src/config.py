@@ -265,27 +265,33 @@ bucket_name = _config["bucket_name"]
 if _config.get("gemini_api_key"):
     os.environ['GOOGLE_API_KEY'] = str(_config["gemini_api_key"])
 
-# Create a database session service
-# Use aiosqlite for async support (required for Cloud Run deployment)
-#session_service = DatabaseSessionService(
-#    db_url="sqlite+aiosqlite:///agent_sessions.db"
-#)
-student_session_service = FirestoreSessionService(
-    db=db,
-    collection="student_sessions",
-)
-
-instructor_session_service = FirestoreSessionService(
-    db=db,
-    collection="instructor_sessions",
-)
-# --- Runner Factory ---
-# Maps agent_type to its session service.
-_SESSION_SERVICES = {
-    "instructor": instructor_session_service,
-    "student": student_session_service,
-    "scoring": instructor_session_service,
+# --- Session Service Factory ---
+# Session services are per-course: data lives under courses/{course_handle}/...
+# Maps agent_type to the Firestore collection name used for sessions.
+_SESSION_COLLECTION_NAMES = {
+    "instructor": "instructor_sessions",
+    "student": "student_sessions",
+    "scoring": "instructor_sessions",
 }
+
+_session_service_cache: dict[tuple[str, str], FirestoreSessionService] = {}
+
+
+def get_session_service(agent_type: str, course_handle: str) -> FirestoreSessionService:
+    """Get or create a per-course FirestoreSessionService for the given agent type.
+
+    Session data is stored under ``courses/{course_handle}/{collection}/...``.
+    Services are cached per ``(agent_type, course_handle)`` pair.
+    """
+    key = (agent_type, course_handle)
+    if key not in _session_service_cache:
+        collection = _SESSION_COLLECTION_NAMES.get(agent_type)
+        if not collection:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+        _session_service_cache[key] = FirestoreSessionService(
+            db=db, collection=collection, course_handle=course_handle,
+        )
+    return _session_service_cache[key]
 
 _runner_cache = {}
 
@@ -303,6 +309,9 @@ def get_runner(agent_type: str, courses: dict | None = None,
     When *course_handle* and *courses* are provided the runner is built with
     the course-specific model and prompt (falling back to defaults when the
     course has no overrides).  Runners are cached per (agent_type, course_handle).
+
+    Each runner receives a per-course session service so that session data is
+    stored under ``courses/{course_handle}/...`` in Firestore.
     """
     # Resolve model and prompt from the course cache (if available)
     model = agent.DEFAULT_MODEL
@@ -316,9 +325,9 @@ def get_runner(agent_type: str, courses: dict | None = None,
 
     key = (agent_type, course_handle)
     if key not in _runner_cache:
-        session_svc = _SESSION_SERVICES.get(agent_type)
-        if not session_svc:
+        if agent_type not in _SESSION_COLLECTION_NAMES:
             raise ValueError(f"Unknown agent type: {agent_type}")
+        session_svc = get_session_service(agent_type, course_handle or "")
         ag = agent.create_agent(agent_type, model, instruction=instruction,
                                 course_handle=course_handle)
         _runner_cache[key] = Runner(
@@ -328,7 +337,7 @@ def get_runner(agent_type: str, courses: dict | None = None,
 
 def invalidate_course_runners(course_handle: str):
     """Remove cached runners for a course so they are recreated with new settings."""
-    for agent_type in _SESSION_SERVICES:
+    for agent_type in _SESSION_COLLECTION_NAMES:
         _runner_cache.pop((agent_type, course_handle), None)
 
 # Pre-populate cache with default runners (course_handle=None → defaults)

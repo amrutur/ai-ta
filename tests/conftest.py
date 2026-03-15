@@ -69,9 +69,8 @@ _mock_config.runner_student.app_name = "ai_ta"
 _mock_config.runner_scoring = MagicMock()
 _mock_config.runner_scoring.app_name = "ai_ta"
 
-# Session service mocks
-_mock_config.instructor_session_service = AsyncMock()
-_mock_config.student_session_service = AsyncMock()
+# Session service factory mock — returns a fresh AsyncMock per call
+_mock_config.get_session_service = MagicMock(side_effect=lambda *args, **kwargs: AsyncMock())
 
 # Inject BEFORE anything tries to ``import config``
 sys.modules["config"] = _mock_config

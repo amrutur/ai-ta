@@ -548,24 +548,26 @@ async def assist(query_body: AssistRequest, request: Request):
             async def _ensure_session_and_db():
                 if is_instructor:
                     await add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
-                    existing = await config.instructor_session_service.get_session(
+                    session_svc = config.get_session_service("instructor", course_handle)
+                    existing = await session_svc.get_session(
                         app_name="ai_ta",
                         user_id=user_gmail, session_id=session_id,
                     )
                     if not existing:
-                        await config.instructor_session_service.create_session(
+                        await session_svc.create_session(
                             app_name="ai_ta",
                             user_id=user_gmail, session_id=session_id,
                             state=initial_state,
                         )
                 else:
                     await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id)
-                    existing = await config.student_session_service.get_session(
+                    session_svc = config.get_session_service("student", course_handle)
+                    existing = await session_svc.get_session(
                         app_name="ai_ta",
                         user_id=user_gmail, session_id=session_id,
                     )
                     if not existing:
-                        await config.student_session_service.create_session(
+                        await session_svc.create_session(
                             app_name="ai_ta",
                             user_id=user_gmail, session_id=session_id,
                             state=initial_state,
@@ -692,7 +694,7 @@ async def grade(query_body: GradeRequest, request: Request):
         answer = query_body.answer + "." if query_body.answer else "No answer."
         rubric = query_body.rubric if query_body.rubric else "No rubric"
 
-        marks, response_text = await score_question(question, answer, rubric, runner, config.instructor_session_service, user_id)
+        marks, response_text = await score_question(question, answer, rubric, runner, config.get_session_service("scoring", course_handle), user_id)
 
         return GradeResponse(
             response=response_text,
@@ -791,7 +793,7 @@ async def regrade_answer(query_body: RegradeAnswerRequest, request: Request):
         rag_material = await retrieve_context(course_handle, rubric_question)
         marks, response_text = await score_question(
             rubric_question, student_answer_str, augmented_answer,
-            runner, config.instructor_session_service, student_id,
+            runner, config.get_session_service("scoring", course_handle), student_id,
             course_material=rag_material
         )
         logging.info(f"Regraded Q{qnum_str} for {student_id}: {marks} marks")
@@ -918,7 +920,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
                 rag_material = await retrieve_context(course_handle, rubric_question)
                 marks, response_text = await score_question(
                     rubric_question, str(student_answer_str), str(rubric_answer_str),
-                    runner, config.instructor_session_service, user_gmail,
+                    runner, config.get_session_service("scoring", course_handle), user_gmail,
                     course_material=rag_material
                 )
                 logging.info(f"Graded Q{qnum_str}: {marks} marks")
@@ -1028,7 +1030,7 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
             rag_material = await retrieve_context(course_handle, rubric_question)
             marks, response_text = await score_question(
                 rubric_question, str(student_answer_str), str(rubric_answer_str),
-                runner, config.instructor_session_service, student_id,
+                runner, config.get_session_service("scoring", course_handle), student_id,
                 course_material=rag_material
             )
             logging.info(f"Graded Q{qnum_str} for {student_id}: {marks} marks")

@@ -43,8 +43,10 @@ def async_db():
 
 @pytest.fixture
 def service(_real_firestore_service, async_db):
-    """Create a FirestoreSessionService with a mock DB."""
-    return _real_firestore_service.FirestoreSessionService(db=async_db, collection="test_sessions")
+    """Create a FirestoreSessionService with a mock DB and course_handle."""
+    return _real_firestore_service.FirestoreSessionService(
+        db=async_db, collection="test_sessions", course_handle="test-course",
+    )
 
 
 def _mock_doc(exists=True, data=None):
@@ -57,15 +59,21 @@ def _mock_doc(exists=True, data=None):
 
 
 class TestSessionRefHelpers:
-    def test_session_ref_path(self, service, async_db):
-        """_session_ref should chain through collection/document properly."""
+    def test_session_ref_chains_through_course(self, service, async_db):
+        """_session_ref should root under courses/{course_handle}/{collection}."""
         ref = service._session_ref("app1", "user1", "sess1")
-        async_db.collection.assert_called_with("test_sessions")
+        # First call should be courses collection
+        async_db.collection.assert_called_with("courses")
+
+    def test_course_root_uses_course_handle(self, service, async_db):
+        """_course_root should navigate to courses/{course_handle}/{collection}."""
+        ref = service._course_root()
+        async_db.collection.assert_called_with("courses")
+        assert ref is not None
 
     def test_events_collection(self, service, async_db):
         """_events_collection should return subcollection of session ref."""
         ref = service._events_collection("app1", "user1", "sess1")
-        # Just verify it doesn't error and returns something
         assert ref is not None
 
     def test_app_state_ref(self, service, async_db):
@@ -77,6 +85,10 @@ class TestSessionRefHelpers:
         """_user_state_ref should navigate to users/{user_id}/_meta/user_state."""
         ref = service._user_state_ref("app1", "user1")
         assert ref is not None
+
+    def test_stores_course_handle(self, service):
+        """Constructor should store course_handle."""
+        assert service.course_handle == "test-course"
 
 
 class TestMergeState:
