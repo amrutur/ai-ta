@@ -1958,35 +1958,22 @@ async def upload_course_materials_page(request: Request):
                     status.style.display = 'block';
 
                     try {{
-                        // Step 1: Get a signed upload URL from our server
-                        const urlResp = await fetch('/get_upload_url', {{
+                        // Upload file directly through the server to GCS
+                        const formData = new FormData();
+                        formData.append('file', f);
+                        formData.append('course_id', courseId);
+                        formData.append('term_id', termId);
+                        formData.append('institution_id', institutionId);
+
+                        const uploadResp = await fetch('/upload_file', {{
                             method: 'POST',
-                            headers: {{'Content-Type': 'application/json'}},
-                            body: JSON.stringify({{
-                                course_id: courseId,
-                                term_id: termId,
-                                institution_id: institutionId,
-                                filename: f.name,
-                                content_type: f.type || 'application/octet-stream'
-                            }}),
+                            body: formData,
                             credentials: 'same-origin'
                         }});
-                        if (!urlResp.ok) {{
-                            let detail = 'HTTP ' + urlResp.status;
-                            try {{ const d = await urlResp.json(); detail = d.detail || detail; }} catch(e) {{}}
+                        if (!uploadResp.ok) {{
+                            let detail = 'HTTP ' + uploadResp.status;
+                            try {{ const d = await uploadResp.json(); detail = d.detail || detail; }} catch(e) {{}}
                             errors.push(f.name + ': ' + detail);
-                            continue;
-                        }}
-                        const {{ upload_url }} = await urlResp.json();
-
-                        // Step 2: PUT the file directly to GCS using the signed URL
-                        const putResp = await fetch(upload_url, {{
-                            method: 'PUT',
-                            headers: {{'Content-Type': f.type || 'application/octet-stream'}},
-                            body: f
-                        }});
-                        if (!putResp.ok) {{
-                            errors.push(f.name + ': GCS upload failed (HTTP ' + putResp.status + ')');
                         }} else {{
                             uploaded++;
                         }}
@@ -2100,6 +2087,58 @@ async def get_upload_url(request: Request):
         logging.error(f"Unexpected error in get_upload_url: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}")
+
+
+@app.post("/upload_file")
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+    course_id: str = Form(...),
+    term_id: str = Form(...),
+    institution_id: str = Form(...)
+):
+    '''
+    Upload a file directly through the server to GCS.
+    This avoids CORS issues with signed URLs by proxying the upload.
+    '''
+    try:
+        user = get_current_user(request)
+
+        if not all([course_id, term_id, institution_id, file.filename]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+
+        course_handle = make_course_handle(institution_id, term_id, course_id)
+
+        user_gmail = user.get('email', '').lower()
+        if not is_authorized(user_gmail, course_handle):
+            raise HTTPException(status_code=403, detail="User is not an instructor for this course nor a platform admin")
+
+        if course_handle not in courses:
+            raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found")
+
+        folder_name = courses[course_handle].get('folder_name', '')
+        if not folder_name:
+            raise HTTPException(status_code=500, detail="Course folder not configured")
+
+        parts = folder_name.split('/', 1)
+        bucket_name = parts[0]
+        prefix = parts[1] if len(parts) > 1 else ''
+        destination = f"{prefix}{file.filename}"
+
+        file_data = await file.read()
+        content_type = file.content_type or 'application/octet-stream'
+
+        from storage_utils import upload_blob
+        upload_blob(bucket_name, destination, file_data, content_type)
+
+        logging.info(f"Instructor {user_gmail} uploaded '{file.filename}' to course {course_handle}")
+        return {"status": "success", "filename": file.filename, "destination": destination}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error in upload_file: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
 
 @app.post("/list_course_files", response_model=ListCourseFilesResponse)
