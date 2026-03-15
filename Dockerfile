@@ -1,7 +1,6 @@
 # Dockerfile for ADK agent system
 FROM python:3.13-slim-bookworm
 
-
 WORKDIR /app
 
 # Copy requirements and install dependencies
@@ -13,8 +12,6 @@ COPY . .
 
 # Set environment variables
 ENV PORT=8080
-ENV GOOGLE_CLOUD_PROJECT=cp220-grading-assistant
-ENV PRODUCTION=1
 
 # Run the application
-CMD ["python", "api_server.py"]
+CMD ["python", "src/api_server.py"]

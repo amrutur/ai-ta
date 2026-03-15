@@ -1,6 +1,6 @@
 # Deployment Guide: Google Cloud Run
 
-This guide walks you through deploying the CP220 Grading Assistant API to Google Cloud Run.
+This guide walks you through deploying the AI Teaching Assistant API to Google Cloud Run.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ This guide walks you through deploying the CP220 Grading Assistant API to Google
 3. **Authenticated with Google Cloud**
    ```bash
    gcloud auth login
-   gcloud config set project cp220-grading-assistant
+   gcloud config set project ai-ta
    ```
 
 4. **Enable required APIs**
@@ -38,7 +38,7 @@ Create a file to store your production environment variable values (DO NOT commi
 
 ```bash
 # .env (DO NOT COMMIT)
-INSTRUCTOR_EMAILS=instructor1@example.com,instructor2@example.com
+ADMIN_EMAIL=admin@example.com
 GOOGLE_CLOUD_PROJECT=your_project_name
 SERVICE_ACCOUNT_EMAIL=email_id@project_id.iam.gserviceaccount.com
 FIRESTORE_CLIENT_ID=<id>
@@ -56,18 +56,27 @@ sed 's/=/: "/' .env | sed 's/$/"/' > env.yaml
 
 ## Step 2: Ensure Secrets are in Secret Manager
 
-Make sure all required secrets are stored in Google Cloud Secret Manager:
+Make sure all required secrets are stored in Google Cloud Secret Manager.
+The env var names below (left) point to the secret names you choose in Secret Manager (right):
 
-- `OAUTH_CLIENT_ID_KEY_NAME`
-- `OAUTH_CLIENT_SECRET_KEY_NAME`
-- `SIGNING_SECRET_KEY_NAME`
-- `FIRESTORE_PRIVATE_KEY_ID_KEY_NAME`
-- `FIRESTORE_PRIVATE_KEY_KEY_NAME`
-- `GEMINI_API_KEY_NAME`
+| Env Var | Description |
+|---------|-------------|
+| `OAUTH_CLIENT_ID_KEY_NAME` | OAuth 2.0 client ID |
+| `OAUTH_CLIENT_SECRET_KEY_NAME` | OAuth 2.0 client secret |
+| `SIGNING_SECRET_KEY_NAME` | HMAC key for signing sessions and JWT tokens |
+| `FIRESTORE_PRIVATE_KEY_ID_KEY_NAME` | Firestore service account key ID |
+| `FIRESTORE_PRIVATE_KEY_KEY_NAME` | Firestore service account private key |
+| `GEMINI_API_KEY_NAME` | Gemini API key |
 
-You can create/update secrets using:
+Create a secret:
 ```bash
-echo -n "your-secret-value" | gcloud secrets create SECRET_NAME --data-file=-
+echo -n "your-secret-value" | gcloud secrets create SECRET_NAME --project=$PROJECT_ID --data-file=-
+```
+
+**Generating the signing secret key** (used for session cookies and JWT tokens — any random 256-bit string):
+```bash
+echo -n "$(python3 -c 'import secrets; print(secrets.token_hex(32))')" | \
+  gcloud secrets create YOUR_SIGNING_SECRET_NAME --project=$PROJECT_ID --data-file=-
 ```
 
 ## Step 3: Build and Push Docker Image
@@ -78,50 +87,50 @@ This builds the image in the cloud without needing local Docker.
 
 ```bash
 # Set your project ID
-export PROJECT_ID=cp220-grading-assistant
+export PROJECT_ID=<your-project-id>
+export SERVICE_NAME=<your-service-name>
 
-# Build and push using Cloud Build
-gcloud builds submit --tag gcr.io/$PROJECT_ID/cp220-grader-api
 
 # Or use Artifact Registry (newer, recommended)
-gcloud builds submit --tag us-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/cp220-grader-api
+gcloud builds submit --tag asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 ```
 
 ### Option B: Build Locally and Push
 
 ```bash
 # Set your project ID
-export PROJECT_ID=cp220-grading-assistant
+export PROJECT_ID=<your-project-id>
+export SERVICE_NAME=<your-service-name>
 
 # Build the Docker image
-docker build -t gcr.io/$PROJECT_ID/cp220-grader-api .
+docker build -t asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME .
 
 # Configure Docker to use gcloud credentials
 gcloud auth configure-docker
 
 # Push the image
-docker push gcr.io/$PROJECT_ID/cp220-grader-api
+docker push asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 ```
 
 ## Step 4: Deploy to Cloud Run
 
 ```bash
 # Set variables
-export PROJECT_ID=cp220-grading-assistant
-export SERVICE_NAME=cp220-grader-api
+export PROJECT_ID=<your-project-id>
+export SERVICE_NAME=<your-service-name>
 export REGION=asia-south1
 
 # Deploy to Cloud Run
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/cp220-grader-api \
+  --image asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME\
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
   --set-env-vars "PRODUCTION=1" \
   --set-env-vars "FIRESTORE_DATABASE_ID=your-database-id" \
-  --set-env-vars "INSTRUCTOR_EMAILS=instructor1@example.com,instructor2@example.com" \
-  --set-env-vars "SENDGRID_FROM_EMAIL=noreply@yourdomain.com" \
+  --set-env-vars "ADMIN_EMAIL=admin@example.com" \
+  --set-env-vars "FROM_EMAIL=your-gmail@gmail.com" \
   --set-env-vars "OAUTH_CLIENT_ID_KEY_NAME=oauth-client-id" \
   --set-env-vars "OAUTH_CLIENT_SECRET_KEY_NAME=oauth-client-secret" \
   --set-env-vars "SIGNING_SECRET_KEY_NAME=signing-secret" \
@@ -138,7 +147,7 @@ gcloud run deploy $SERVICE_NAME \
 or if you have the env.yaml file then use 
 ```bash
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/cp220-grader-api \
+  --image asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME\
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
@@ -154,9 +163,9 @@ gcloud run deploy $SERVICE_NAME \
 
 After deployment, Cloud Run will give you a URL like:
 ```
-https://cp220-grader-api-622756405105.asia-south1.run.app
+https://<your-service-name>-622756405105.asia-south1.run.app
 ```
-(Or check with: `gcloud run services describe cp220-grader-api --region asia-south1 --format 'value(status.url)'`)
+(Or check with: `gcloud run services describe <your-service-name> --region asia-south1 --format 'value(status.url)'`)
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Navigate to **APIs & Services** > **Credentials**
@@ -167,20 +176,21 @@ https://cp220-grader-api-622756405105.asia-south1.run.app
    ```
 5. Click **Save**
 
-## Step 6: Configure SendGrid for Email Notifications (Optional but Recommended)
+## Step 6: Configure Gmail SMTP for Email Notifications (Optional but Recommended)
 
-To enable email notifications for graded assignments, you need to set up SendGrid.
-
-The SendGrid API key should already be stored in Secret Manager as `sendgrid-api-key`.
+To enable email notifications for graded assignments, you need a Gmail account with an app password.
 
 Quick steps:
-1. Verify the secret exists: `gcloud secrets describe sendgrid-api-key --project=$PROJECT_ID`
-2. Set `SENDGRID_FROM_EMAIL` environment variable (already done in Step 4)
-3. Verify the sender email in SendGrid dashboard
+1. Create a Gmail app password (see [GMAIL_SETUP.md](GMAIL_SETUP.md))
+2. Store it in Secret Manager as `EMAIL_KEY`:
+   ```bash
+   echo -n "your-app-password" | gcloud secrets create EMAIL_KEY --project=$PROJECT_ID --data-file=-
+   ```
+3. Set the `FROM_EMAIL` environment variable to the Gmail address (already done in Step 4)
 
 If you skip this step, the application will work but email notifications won't be sent.
 
-See [SENDGRID_SETUP.md](SENDGRID_SETUP.md) for complete setup instructions.
+See [GMAIL_SETUP.md](GMAIL_SETUP.md) for complete setup instructions.
 
 ## Step 7: Test Your Deployment
 
@@ -203,10 +213,10 @@ git commit -m "Your changes"
 git push
 
 # 2. Rebuild and redeploy
-gcloud builds submit --tag gcr.io/$PROJECT_ID/cp220-grader-api
+gcloud builds submit --tag asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
 
 gcloud run deploy $SERVICE_NAME \
-  --image gcr.io/$PROJECT_ID/cp220-grader-api \
+  --image asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME \
   --region $REGION \
   --platform managed
 ```
@@ -215,11 +225,11 @@ gcloud run deploy $SERVICE_NAME \
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID | `cp220-grading-assistant` |
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID | `ai-ta` |
 | `PRODUCTION` | Set to 1 for production | `1` |
 | `FIRESTORE_DATABASE_ID` | Firestore database ID | `(default)` |
-| `INSTRUCTOR_EMAILS` | Comma-separated instructor emails | `prof@example.com,ta@example.com` |
-| `SENDGRID_FROM_EMAIL` | Email address to send from (must be verified in SendGrid) | `noreply@yourdomain.com` |
+| `ADMIN_EMAIL` | Platform administrator email | `admin@example.com` |
+| `FROM_EMAIL` | Gmail address used to send email notifications | `your-gmail@gmail.com` |
 | `OAUTH_REDIRECT_URI` | Optional custom redirect URI | Only for dev with ngrok |
 | Secret key environment variables (point to Secret Manager secrets) ||
 | `OAUTH_CLIENT_ID_KEY_NAME` | Name of secret containing OAuth client ID | `oauth-client-id` |
@@ -244,9 +254,9 @@ gcloud run services describe $SERVICE_NAME --region $REGION
 ### Test locally with Docker
 ```bash
 docker run -p 8080:8080 \
-  -e GOOGLE_CLOUD_PROJECT=cp220-grading-assistant \
+  -e GOOGLE_CLOUD_PROJECT=ai-ta \
   -e PRODUCTION=0 \
-  gcr.io/$PROJECT_ID/cp220-grader-api
+  gcr.io/$PROJECT_ID/$SERVICE_NAME
 ```
 
 ## Security Checklist
@@ -257,7 +267,7 @@ docker run -p 8080:8080 \
 - [ ] Service account permissions reviewed
 - [ ] Cloud Run service configured with appropriate memory/CPU limits
 - [ ] Firestore security rules configured
-- [ ] API rate limiting considered
+- [ ] Per-student rate limiting configured for each course (via `/update_course_config`)
 
 ## Cost Optimization
 

@@ -1,0 +1,37 @@
+[project]
+name = "ai-ta"
+version = "0.1.0"
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"          # auto-detect async test functions
+pythonpath = ["src"]            # so tests can `import database` etc.
+
+# ---------------------------------------------------------------------------
+# ruff  (linter + formatter)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 140
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort (import ordering)
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "ASYNC",# flake8-async (missing awaits, etc.)
+]
+ignore = [
+    "E501", # line too long — handled by formatter
+    "B008", # do not perform function calls in argument defaults (FastAPI Depends)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B018"]  # allow useless expressions in tests (assertions)

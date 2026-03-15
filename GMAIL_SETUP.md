@@ -1,164 +1,115 @@
-# Gmail Service Account Setup Guide
+# Gmail SMTP Email Setup Guide
 
-This guide explains how to configure the service account to send emails using Gmail API with domain-wide delegation.
-
-## Prerequisites
-
-**IMPORTANT**: This setup requires **Google Workspace** (formerly G Suite). It will NOT work with regular/personal Gmail accounts.
-
-If you don't have Google Workspace, see the "Alternative: Use SendGrid" section at the bottom.
+This guide explains how to configure Gmail SMTP for sending grade notification emails from the AI Teaching Assistant.
 
 ## Overview
 
-The application uses a service account (`cp220-firestore@cp220-grading-assistant.iam.gserviceaccount.com`) with domain-wide delegation to send emails on behalf of a user in your Google Workspace domain.
+The application uses Gmail's SMTP server (`smtp.gmail.com:587`) to send email notifications when instructors notify students of their grades. This requires a Gmail account and an app-specific password.
 
-## Step 1: Enable Gmail API
+## Prerequisites
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Select your project: `cp220-grading-assistant`
-3. Navigate to **APIs & Services** > **Library**
-4. Search for "Gmail API"
-5. Click **Enable**
+- A Gmail account (personal or Google Workspace)
+- 2-Step Verification enabled on the Gmail account
 
-## Step 2: Configure Domain-Wide Delegation
+## Step 1: Enable 2-Step Verification
 
-### A. Get Service Account Client ID
+If you haven't already:
 
-1. Go to **IAM & Admin** > **Service Accounts**
-2. Find your service account: `cp220-firestore@cp220-grading-assistant.iam.gserviceaccount.com`
-3. Click on the service account
-4. Copy the **Client ID** (it's a long number, e.g., `101156988112383641306`)
-   - You can also find it under "OAuth 2.0 Client ID"
+1. Go to [Google Account Security](https://myaccount.google.com/security)
+2. Under "How you sign in to Google", click **2-Step Verification**
+3. Follow the prompts to enable it
 
-### B. Enable Domain-Wide Delegation in Google Workspace Admin Console
+## Step 2: Create a Gmail App Password
 
-**Note**: You need Google Workspace Admin privileges for this step.
+1. Go to [Google App Passwords](https://myaccount.google.com/apppasswords)
+   - If you don't see this option, ensure 2-Step Verification is enabled
+2. Enter a name for the app (e.g., "AI Teaching Assistant")
+3. Click **Create**
+4. **Copy the 16-character app password** (you won't see it again)
 
-1. Go to [Google Workspace Admin Console](https://admin.google.com/)
-2. Navigate to **Security** > **Access and data control** > **API Controls**
-3. Click **Manage Domain-Wide Delegation**
-4. Click **Add new**
-5. Enter the following:
-   - **Client ID**: Paste the Client ID from Step 2A (the long number)
-   - **OAuth Scopes**: Enter the following scope:
-     ```
-     https://www.googleapis.com/auth/gmail.send
-     ```
-6. Click **Authorize**
+## Step 3: Store the App Password in Secret Manager
 
-## Step 3: Configure Environment Variable
+Store the app password in Google Cloud Secret Manager with the name `EMAIL_KEY`:
 
-Set the `GMAIL_SENDER_EMAIL` environment variable to the email address you want to send from. This must be a valid email address in your Google Workspace domain.
+```bash
+echo -n "your-16-char-app-password" | gcloud secrets create EMAIL_KEY \
+  --project=your-project-id \
+  --data-file=-
+```
+
+If the secret already exists and you need to update it:
+
+```bash
+echo -n "your-new-app-password" | gcloud secrets versions add EMAIL_KEY \
+  --project=your-project-id \
+  --data-file=-
+```
+
+## Step 4: Set the FROM_EMAIL Environment Variable
+
+Set `FROM_EMAIL` to the Gmail address that will send notification emails.
 
 ### For Local Development:
 ```bash
-export GMAIL_SENDER_EMAIL="noreply@yourdomain.com"
-# or whatever email address you want to send from
+export FROM_EMAIL="your-gmail@gmail.com"
 ```
 
 ### For Production (Cloud Run):
 ```bash
-gcloud run services update cp220-grader-api \
-  --update-env-vars GMAIL_SENDER_EMAIL="noreply@yourdomain.com" \
-  --region us-east1
+gcloud run services update your-service-name \
+  --update-env-vars FROM_EMAIL="your-gmail@gmail.com" \
+  --region your-region
 ```
 
-Or add it in the Cloud Console:
-1. Go to Cloud Run > cp220-grader-api
-2. Click **Edit & Deploy New Revision**
-3. Add environment variable:
-   - Name: `GMAIL_SENDER_EMAIL`
-   - Value: `noreply@yourdomain.com` (or your preferred sender email)
+Or include it in your `env.yaml` / deployment command (see [DEPLOYMENT.md](DEPLOYMENT.md)).
 
-## Step 4: Test Email Sending
-
-After completing the setup:
+## Step 5: Test Email Sending
 
 1. Restart your application
-2. Check logs for confirmation:
+2. Check logs for confirmation — if `FROM_EMAIL` is not set you will see:
    ```
-   Gmail service initialized with service account, sending as: noreply@yourdomain.com
+   WARNING: FROM_EMAIL environment variable not set. Email notifications will not work.
    ```
-3. Test the `/notify_student_grades` endpoint
+3. Test by calling the `/notify_student_grades` endpoint as an instructor
 
 ## Troubleshooting
 
-### Error: "Email service not initialized"
-- **Cause**: `GMAIL_SENDER_EMAIL` environment variable not set
-- **Solution**: Set the environment variable as shown in Step 3
+### Warning: "FROM_EMAIL environment variable not set"
+- **Cause**: `FROM_EMAIL` not set in environment
+- **Solution**: Set the `FROM_EMAIL` environment variable (see Step 4)
 
-### Error: "Client is unauthorized to retrieve access tokens"
-- **Cause**: Domain-wide delegation not properly configured
+### Error: "Failed to send email to ..."
+- **Cause**: Invalid app password or account issue
 - **Solution**:
-  1. Verify you completed Step 2B in Google Workspace Admin Console
-  2. Make sure you used the correct Client ID
-  3. Double-check the scope: `https://www.googleapis.com/auth/gmail.send`
-  4. Wait a few minutes for changes to propagate
+  1. Verify 2-Step Verification is enabled
+  2. Generate a new app password (Step 2)
+  3. Update the `EMAIL_KEY` secret in Secret Manager (Step 3)
+  4. Restart the application
 
-### Error: "Failed to send email: 403"
-- **Cause**: The sender email address doesn't exist in your domain or lacks permissions
+### Error: "SMTPAuthenticationError"
+- **Cause**: Incorrect app password or the Gmail account has security restrictions
 - **Solution**:
-  1. Verify the email address in `GMAIL_SENDER_EMAIL` exists in your Google Workspace
-  2. Ensure the user account is active (not suspended)
-
-### Error: "Failed to send email: 400"
-- **Cause**: Invalid email format or recipient
-- **Solution**: Check that the recipient email address is valid
-
-### Logs show "GMAIL_SENDER_EMAIL not configured"
-- **Cause**: Environment variable not set
-- **Solution**: Set `GMAIL_SENDER_EMAIL` environment variable
+  1. Make sure you are using an **app password**, not the account password
+  2. Re-generate the app password and update Secret Manager
 
 ## Verification Checklist
 
-- [ ] Gmail API is enabled in Google Cloud Console
-- [ ] Service account Client ID has been copied
-- [ ] Domain-wide delegation configured in Google Workspace Admin Console
-- [ ] Scope `https://www.googleapis.com/auth/gmail.send` is authorized
-- [ ] `GMAIL_SENDER_EMAIL` environment variable is set
-- [ ] Sender email address exists in your Google Workspace domain
-- [ ] Application has been restarted
-- [ ] Logs confirm Gmail service initialized successfully
+- [ ] 2-Step Verification enabled on Gmail account
+- [ ] App password generated
+- [ ] App password stored in Secret Manager as `EMAIL_KEY`
+- [ ] `FROM_EMAIL` environment variable set to the Gmail address
+- [ ] Application deployed/restarted
+- [ ] Test email sent successfully via `/notify_student_grades`
+
+## Gmail SMTP Rate Limits
+
+- **Per-day limit**: 500 emails/day (personal Gmail), 2,000 emails/day (Google Workspace)
+- **Per-minute**: No official per-minute limit, but the application throttles bulk sends with 10-second delays between emails to avoid triggering Google's spam filters
+- For large classes, consider Google Workspace for higher limits
 
 ## Security Best Practices
 
-1. **Use a dedicated email address** for sending notifications (e.g., `noreply@yourdomain.com`)
-2. **Limit scope** - Only grant `gmail.send`, not full Gmail access
-3. **Monitor usage** - Regularly review sent emails in Gmail
-4. **Rate limiting** - Be aware of Gmail API quotas (default: 1 billion quota units/day)
-
-## Alternative: Use SendGrid (if you don't have Google Workspace)
-
-If you don't have Google Workspace, you can use SendGrid instead:
-
-### 1. Sign up for SendGrid
-- Go to [SendGrid](https://sendgrid.com/)
-- Create a free account (100 emails/day free tier)
-
-### 2. Get API Key
-- In SendGrid dashboard, go to Settings > API Keys
-- Create a new API key with "Mail Send" permissions
-- Copy the API key
-
-### 3. Store API Key in Secret Manager
-```bash
-echo -n "your-sendgrid-api-key" | gcloud secrets create sendgrid-api-key --data-file=-
-```
-
-### 4. Modify Code
-You would need to modify the email sending code to use SendGrid's Python library instead of Gmail API. This requires code changes which can be done if needed.
-
-## Gmail API Quotas
-
-- **Per-user rate limit**: 250 quota units per user per second
-- **Daily quota**: 1 billion quota units per day
-- Each email send costs approximately 100 quota units
-- This means you can send approximately 10 million emails per day
-
-For more details, see [Gmail API Usage Limits](https://developers.google.com/gmail/api/reference/quota)
-
-## References
-
-- [Domain-Wide Delegation Setup](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority)
-- [Gmail API Documentation](https://developers.google.com/gmail/api)
-- [Service Account Authentication](https://cloud.google.com/iam/docs/service-accounts)
+1. **Use a dedicated Gmail account** for sending notifications (not a personal account)
+2. **Never commit** the app password to version control — always use Secret Manager
+3. **Rotate** the app password periodically
+4. **Monitor** the Gmail account's "Sent" folder to verify delivery
