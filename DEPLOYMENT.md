@@ -208,7 +208,7 @@ When you make code changes:
 
 ```bash
 # 1. Commit your changes to git
-git add .gcloud builds submit --tag asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME
+git add .
 git commit -m "Your changes"
 git push
 
