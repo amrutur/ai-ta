@@ -289,20 +289,49 @@ _SESSION_SERVICES = {
 
 _runner_cache = {}
 
-def get_runner(agent_type: str, model: str = agent.DEFAULT_MODEL) -> Runner:
-    """Get or create a Runner for the given agent type and model (cached)."""
-    key = (agent_type, model)
+# Map agent_type -> the key in the courses cache that holds the custom prompt
+_PROMPT_KEYS = {
+    "instructor": "instructor_assist_prompt",
+    "student": "student_assist_prompt",
+    "scoring": "scoring_assist_prompt",
+}
+
+def get_runner(agent_type: str, courses: dict | None = None,
+               course_handle: str | None = None) -> Runner:
+    """Get or create a Runner for the given agent type and course (cached).
+
+    When *course_handle* and *courses* are provided the runner is built with
+    the course-specific model and prompt (falling back to defaults when the
+    course has no overrides).  Runners are cached per (agent_type, course_handle).
+    """
+    # Resolve model and prompt from the course cache (if available)
+    model = agent.DEFAULT_MODEL
+    instruction = None
+    if courses and course_handle and course_handle in courses:
+        course_data = courses[course_handle]
+        model = course_data.get('ai_model') or agent.DEFAULT_MODEL
+        prompt_key = _PROMPT_KEYS.get(agent_type)
+        if prompt_key:
+            instruction = course_data.get(prompt_key) or None
+
+    key = (agent_type, course_handle)
     if key not in _runner_cache:
         session_svc = _SESSION_SERVICES.get(agent_type)
         if not session_svc:
             raise ValueError(f"Unknown agent type: {agent_type}")
-        ag = agent.create_agent(agent_type, model)
+        ag = agent.create_agent(agent_type, model, instruction=instruction,
+                                course_handle=course_handle)
         _runner_cache[key] = Runner(
             app_name="ai_ta", agent=ag, session_service=session_svc
         )
     return _runner_cache[key]
 
-# Pre-populate cache with default runners for backward compatibility
+def invalidate_course_runners(course_handle: str):
+    """Remove cached runners for a course so they are recreated with new settings."""
+    for agent_type in _SESSION_SERVICES:
+        _runner_cache.pop((agent_type, course_handle), None)
+
+# Pre-populate cache with default runners (course_handle=None → defaults)
 runner_instructor = get_runner("instructor")
 runner_student = get_runner("student")
 runner_scoring = get_runner("scoring")

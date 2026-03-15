@@ -29,6 +29,27 @@ def make_course_handle(institution_id: str, term_id: str, course_id: str) -> str
     name = re.sub(r'-+', '-', name).strip('-')
     return name
 
+async def load_default_values(db) -> dict:
+    '''Load default values from the courses/default_values document.
+
+    Returns:
+        Dictionary with keys like ai_model, instructor_assist_prompt, etc.
+        Returns empty dict if the document does not exist.
+    '''
+    try:
+        doc_ref = db.collection(u'courses').document('default_values')
+        doc = await doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            logging.info(f"Loaded default_values from Firestore: {list(data.keys())}")
+            return data
+        else:
+            logging.warning("courses/default_values document not found in Firestore")
+            return {}
+    except Exception as e:
+        logging.error(f"Failed to load default_values from Firestore: {e}")
+        return {}
+
 async def load_course_info_from_db(db) -> dict:
     '''Load all course documents from Firestore and return them as a dict.
 

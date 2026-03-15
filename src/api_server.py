@@ -91,12 +91,14 @@ from database import (
     get_marks_list,
     get_course_data,
     load_course_info_from_db,
-    load_notebooks_from_db
+    load_notebooks_from_db,
+    load_default_values
 )
 from drive_utils import load_notebook_from_google_drive_sa
 from email_service import send_email
 from storage_utils import upload_blob, generate_signed_upload_url
 from rag import build_course_index, retrieve_context
+import agent
 from rate_limiter import student_rate_limiter
 import datetime
 from collections import defaultdict
@@ -156,13 +158,23 @@ else:
 async def load_courses_cache():
     """Load all courses from Firestore into the in-memory cache on startup."""
     try:
+        # Load platform-wide default values (prompts, model) from courses/default_values
+        default_values = await load_default_values(config.db)
+
         all_courses = await load_course_info_from_db(config.db)
         for course_handle, course_data in all_courses.items():
+            if course_handle == 'default_values':
+                continue  # skip the defaults document itself
             courses[course_handle] = course_data
             courses[course_handle].setdefault('isactive_tutor', True)
             courses[course_handle].setdefault('student_rate_limit', None)
             courses[course_handle].setdefault('student_rate_limit_window', None)
-            # model defaults to None (uses agent.DEFAULT_MODEL via the runner factory)
+
+            # Populate per-course prompts/model: use course-level if set, else defaults
+            for key in ('ai_model', 'instructor_assist_prompt',
+                        'student_assist_prompt', 'scoring_assist_prompt'):
+                courses[course_handle].setdefault(key, default_values.get(key))
+
             # Load rubric notebooks for this course into the cache
             notebooks = await load_notebooks_from_db(config.db, course_handle)
             for notebook_id, notebook_data in notebooks.items():
@@ -537,24 +549,24 @@ async def assist(query_body: AssistRequest, request: Request):
                 if is_instructor:
                     await add_instructor_notebook_if_not_exists(config.db, course_handle, notebook_id)
                     existing = await config.instructor_session_service.get_session(
-                        app_name=config.runner_instructor.app_name,
+                        app_name="ai_ta",
                         user_id=user_gmail, session_id=session_id,
                     )
                     if not existing:
                         await config.instructor_session_service.create_session(
-                            app_name=config.runner_instructor.app_name,
+                            app_name="ai_ta",
                             user_id=user_gmail, session_id=session_id,
                             state=initial_state,
                         )
                 else:
                     await add_student_notebook_if_not_exists(config.db, course_handle, user_gmail, user_name, notebook_id)
                     existing = await config.student_session_service.get_session(
-                        app_name=config.runner_student.app_name,
+                        app_name="ai_ta",
                         user_id=user_gmail, session_id=session_id,
                     )
                     if not existing:
                         await config.student_session_service.create_session(
-                            app_name=config.runner_student.app_name,
+                            app_name="ai_ta",
                             user_id=user_gmail, session_id=session_id,
                             state=initial_state,
                         )
@@ -585,8 +597,7 @@ async def assist(query_body: AssistRequest, request: Request):
                     parts.append(types.Part.from_text(text="{The instructor's answer is} " + str(answer)))
                 if output:
                     parts.append(types.Part.from_text(text="{The instructor's code output is} " + json.dumps(output)))
-                course_model = courses[course_handle].get('model')
-                runner = config.get_runner("instructor", course_model) if course_model else config.runner_instructor
+                runner = config.get_runner("instructor", courses, course_handle)
             else:
                 # Student path — use cached rubric data without revealing the answer
                 if notebook_id not in courses[course_handle]:
@@ -612,8 +623,7 @@ async def assist(query_body: AssistRequest, request: Request):
                     parts.append(types.Part.from_text(text="{The rubric is} " + str(rubric_answer)))
                 if rubric_output is not None:
                     parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
-                course_model = courses[course_handle].get('model')
-                runner = config.get_runner("student", course_model) if course_model else config.runner_student
+                runner = config.get_runner("student", courses, course_handle)
 
             # Prepend RAG material if available
             if rag_material:
@@ -656,8 +666,7 @@ async def grade(query_body: GradeRequest, request: Request):
 
     '''Grade a single question-answer'''
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
-    course_model = courses[course_handle].get('model') if course_handle in courses else None
-    runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
+    runner = config.get_runner("scoring", courses, course_handle)
 
     if ('user' in request.session) : #user is logged and authenticated
         user_id = request.session['user']['id']
@@ -777,8 +786,7 @@ async def regrade_answer(query_body: RegradeAnswerRequest, request: Request):
             augmented_answer += f"\n\n{{student's contention}}\n{query_body.student_contends}"
 
         # RAG retrieval + scoring
-        course_model = courses[course_handle].get('model')
-        runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
+        runner = config.get_runner("scoring", courses, course_handle)
 
         rag_material = await retrieve_context(course_handle, rubric_question)
         marks, response_text = await score_question(
@@ -856,8 +864,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     if not is_authorized(user_gmail, course_handle):
         check_student_rate_limit(user_gmail, course_handle)
 
-    course_model = courses[course_handle].get('model')
-    runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
+    runner = config.get_runner("scoring", courses, course_handle)
 
     async def _generate():
         try:
@@ -981,8 +988,7 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
     if not is_authorized(user_gmail, course_handle):
         raise HTTPException(status_code=403, detail="Only instructors can use the grade_notebook endpoint.")
 
-    course_model = courses[course_handle].get('model')
-    runner = config.get_runner("scoring", course_model) if course_model else config.runner_scoring
+    runner = config.get_runner("scoring", courses, course_handle)
     notebook_id = query_body.notebook_id
 
     # Validate rubric data exists for the notebook
@@ -2191,6 +2197,23 @@ async def create_course_api(
         courses[course_handle]['created_at'] = datetime.datetime.utcnow()
 
         courses[course_handle]['isactive_tutor']= True
+
+        # Load platform default values to fall back on for prompts/model
+        default_values = await load_default_values(config.db)
+
+        # AI model and prompts: use supplied values, else fall back to defaults
+        courses[course_handle]['ai_model'] = (
+            query_body.ai_model or default_values.get('ai_model')
+        )
+        courses[course_handle]['instructor_assist_prompt'] = (
+            query_body.instructor_assist_prompt or default_values.get('instructor_assist_prompt')
+        )
+        courses[course_handle]['student_assist_prompt'] = (
+            query_body.student_assist_prompt or default_values.get('student_assist_prompt')
+        )
+        courses[course_handle]['scoring_assist_prompt'] = (
+            query_body.scoring_assist_prompt or default_values.get('scoring_assist_prompt')
+        )
 
         if await create_course(config.db, courses[course_handle]):
             logging.info(f"Admin {current_user.get('email')} created course {query_body.course_name} ({courses[course_handle]['course_id']})")

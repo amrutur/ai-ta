@@ -57,9 +57,18 @@ _AGENT_CONFIGS = {
     },
 }
 
-def create_agent(agent_type: str, model: str = DEFAULT_MODEL) -> Agent:
-    """Create (or return cached) Agent for the given type and model."""
-    key = (agent_type, model)
+def create_agent(agent_type: str, model: str = DEFAULT_MODEL,
+                  instruction: str | None = None,
+                  course_handle: str | None = None) -> Agent:
+    """Create (or return cached) Agent for the given type, model, and course.
+
+    Args:
+        agent_type: One of "instructor", "student", "scoring".
+        model: The model name to use.
+        instruction: Optional custom prompt. If None, the default prompt is used.
+        course_handle: Optional course identifier for per-course caching.
+    """
+    key = (agent_type, model, course_handle)
     if key in _agent_cache:
         return _agent_cache[key]
 
@@ -67,7 +76,12 @@ def create_agent(agent_type: str, model: str = DEFAULT_MODEL) -> Agent:
     if not cfg:
         raise ValueError(f"Unknown agent type: {agent_type}")
 
-    ag = Agent(model=model, **cfg)
+    # Override the instruction if a custom one is provided
+    agent_kwargs = {k: v for k, v in cfg.items()}
+    if instruction:
+        agent_kwargs["instruction"] = instruction
+
+    ag = Agent(model=model, **agent_kwargs)
     _agent_cache[key] = ag
     return ag
 

@@ -119,6 +119,10 @@ class CreateCourseRequest(BaseModel):
     ta_name: str | None = None
     ta_email: EmailStr | None = None
     ta_gmail: EmailStr | None = None
+    ai_model: str | None = None
+    instructor_assist_prompt: str | None = None
+    student_assist_prompt: str | None = None
+    scoring_assist_prompt: str | None = None
 
 class CreateCourseResponse(BaseModel):
     response: str

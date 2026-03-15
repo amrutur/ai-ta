@@ -578,14 +578,15 @@ class TestCreateCourseEndpoint:
         """Admin user should be able to create a course."""
         with patch("api_server.get_course_data", new_callable=AsyncMock, return_value=None):
             with patch("api_server.create_course", new_callable=AsyncMock, return_value=True):
-                resp = client.post(
-                    "/create_course",
-                    json={
-                        "course_id": "6.001", "term_id": "2025",
-                        "institution_id": "mit",
-                    },
-                    headers=_admin_header(),
-                )
+                with patch("api_server.load_default_values", new_callable=AsyncMock, return_value={}):
+                    resp = client.post(
+                        "/create_course",
+                        json={
+                            "course_id": "6.001", "term_id": "2025",
+                            "institution_id": "mit",
+                        },
+                        headers=_admin_header(),
+                    )
         assert resp.status_code == 200
 
 
