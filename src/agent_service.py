@@ -18,6 +18,32 @@ from google.adk import Runner
 from firestore_service import FirestoreSessionService
 from google.genai import types
 
+# ---------------------------------------------------------------------------
+# Prompt-size safety: truncate oversized text to stay within LLM token limits.
+# Gemini allows ~1 048 576 tokens.  1 token ≈ 4 chars.
+# We reserve headroom for system prompts, so individual fields are capped and
+# the total prompt is validated before sending.
+# ---------------------------------------------------------------------------
+MAX_TOTAL_PROMPT_CHARS = 3_000_000      # ~750K tokens – leaves room for system prompt
+MAX_FIELD_CHARS        = 1_000_000      # ~250K tokens per field
+MAX_OUTPUT_CHARS       =   400_000      # code outputs can be huge; cap aggressively
+
+_TRUNCATION_NOTICE = "\n... [truncated to stay within token limits] ..."
+
+
+def truncate_text(text: str, max_chars: int = MAX_FIELD_CHARS) -> str:
+    """Return *text* truncated to *max_chars*, appending a notice if cut."""
+    if not text or len(text) <= max_chars:
+        return text
+    logging.warning("Truncating text from %d to %d chars", len(text), max_chars)
+    return text[:max_chars] + _TRUNCATION_NOTICE
+
+
+def truncate_prompt(prompt: str, max_chars: int = MAX_TOTAL_PROMPT_CHARS) -> str:
+    """Final safety net: truncate the assembled prompt itself."""
+    return truncate_text(prompt, max_chars)
+
+
 # Limit concurrent Gemini API calls to avoid rate-limit errors
 DEFAULT_SEMAPHORE_LIMIT = 5
 _gemini_semaphore = asyncio.Semaphore(DEFAULT_SEMAPHORE_LIMIT)
@@ -119,15 +145,16 @@ async def score_question(question: str, answer: str, rubric: str, runner: Runner
             session_id=session_id
         )
 
-        question = "{The assignment question is:}" + question + "."
-        answer = "{The student's answer is: }" + answer + "."
-        rubric = "{The scoring rubric is:}" + rubric + "."
+        question = "{The assignment question is:}" + truncate_text(question) + "."
+        answer = "{The student's answer is: }" + truncate_text(answer) + "."
+        rubric = "{The scoring rubric is:}" + truncate_text(rubric) + "."
 
         # Create the prompt content
         full_prompt = ""
         if course_material:
-            full_prompt += "{Relevant course material:}" + course_material + " "
+            full_prompt += "{Relevant course material:}" + truncate_text(course_material) + " "
         full_prompt += question + rubric + answer
+        full_prompt = truncate_prompt(full_prompt)
         content = types.Content(
             role="user",
             parts=[types.Part.from_text(text=full_prompt)]
