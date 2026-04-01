@@ -43,11 +43,17 @@ class FirestoreSessionService(BaseSessionService):
             collection serves as the parent for all session data.
     """
 
+    # Default cap on events loaded per session.  Keeps the conversation
+    # history sent to the LLM within token limits (each event can carry a
+    # large prompt + response).  Only the most recent events are kept.
+    DEFAULT_MAX_EVENTS = 10
+
     def __init__(self, db: AsyncClient, collection: str = "agent_sessions",
-                 course_handle: str = ""):
+                 course_handle: str = "", max_events: int | None = None):
         self.db = db
         self.collection = collection
         self.course_handle = course_handle
+        self.max_events = max_events if max_events is not None else self.DEFAULT_MAX_EVENTS
 
     # ---- internal helpers ----
 
@@ -201,10 +207,19 @@ class FirestoreSessionService(BaseSessionService):
 
         data = doc.to_dict()
 
-        # Load events from subcollection, ordered by timestamp
+        # Load events from subcollection, ordered by timestamp.
+        # To prevent unbounded conversation history from exceeding LLM token
+        # limits, only the most recent `self.max_events` events are loaded
+        # (unless the caller passes a GetSessionConfig that further narrows).
         events = []
         events_ref = self._events_collection(app_name, user_id, session_id)
-        async for event_doc in events_ref.order_by("timestamp").stream():
+        query = events_ref.order_by("timestamp")
+        effective_limit = self.max_events
+        if config and config.num_recent_events:
+            effective_limit = config.num_recent_events
+        if effective_limit and effective_limit > 0:
+            query = query.limit_to_last(effective_limit)
+        async for event_doc in query.stream():
             event_data = event_doc.to_dict()
             try:
                 event = Event.model_validate(event_data)
@@ -221,14 +236,12 @@ class FirestoreSessionService(BaseSessionService):
             last_update_time=data.get("last_update_time", 0.0),
         )
 
-        # Apply GetSessionConfig filters
-        if config:
-            if config.num_recent_events:
-                session.events = session.events[-config.num_recent_events:]
-            if config.after_timestamp:
-                session.events = [
-                    e for e in session.events if e.timestamp >= config.after_timestamp
-                ]
+        # Apply remaining GetSessionConfig filters (num_recent_events is
+        # already handled at the query level above).
+        if config and config.after_timestamp:
+            session.events = [
+                e for e in session.events if e.timestamp >= config.after_timestamp
+            ]
 
         # Merge app/user state
         app_state = await self._get_app_state(app_name)
