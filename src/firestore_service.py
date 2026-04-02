@@ -13,7 +13,9 @@ subcollection for scalability.
 """
 
 import copy
+import json
 import logging
+import sys
 import time
 import uuid
 from typing import Any, Optional
@@ -47,6 +49,27 @@ class FirestoreSessionService(BaseSessionService):
     # history sent to the LLM within token limits (each event can carry a
     # large prompt + response).  Only the most recent events are kept.
     DEFAULT_MAX_EVENTS = 10
+
+    # Maximum total size (in bytes) for the serialized events loaded in
+    # get_session.  If the events exceed this, the oldest events are dropped
+    # until the total fits.  1 MB by default.
+    MAX_SESSION_EVENTS_BYTES = 1 * 1024 * 1024
+
+    # Prefixes that identify non-interaction context parts (RAG, rubric,
+    # question context, etc.).  These are stripped from events before
+    # persisting so that only the student–agent dialogue is captured.
+    _CONTEXT_PREFIXES = (
+        "{Relevant course material:}",
+        "{The context is:}",
+        "{The topic content is:}",
+        "{The question is:}",
+        "{The student's answer is}",
+        "{The student's code output is}",
+        "{The rubric is}",
+        "{The rubric code output is}",
+        "{The instructor's answer is}",
+        "{The instructor's code output is}",
+    )
 
     def __init__(self, db: AsyncClient, collection: str = "agent_sessions",
                  course_handle: str = "", max_events: int | None = None):
@@ -227,6 +250,17 @@ class FirestoreSessionService(BaseSessionService):
             except Exception as e:
                 logger.warning("Failed to deserialize event %s: %s", event_doc.id, e)
 
+        # --- Size guard: drop oldest events until total size is within limit ---
+        total_bytes = sum(sys.getsizeof(json.dumps(e.model_dump(mode="json", exclude_none=True))) for e in events)
+        if total_bytes > self.MAX_SESSION_EVENTS_BYTES:
+            logger.warning(
+                "Session %s events total %d bytes (limit %d). Truncating oldest events.",
+                session_id, total_bytes, self.MAX_SESSION_EVENTS_BYTES,
+            )
+            while events and total_bytes > self.MAX_SESSION_EVENTS_BYTES:
+                removed = events.pop(0)
+                total_bytes -= sys.getsizeof(json.dumps(removed.model_dump(mode="json", exclude_none=True)))
+
         session = Session(
             app_name=app_name,
             user_id=user_id,
@@ -332,8 +366,19 @@ class FirestoreSessionService(BaseSessionService):
         user_id = session.user_id
         session_id = session.id
 
-        # Serialize event to Firestore
+        # Strip non-interaction context parts (RAG, rubric, question text,
+        # etc.) so only the student–agent dialogue is persisted.
         event_data = event.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if event_data.get("content") and event_data["content"].get("parts"):
+            event_data["content"]["parts"] = [
+                part for part in event_data["content"]["parts"]
+                if not (
+                    isinstance(part.get("text"), str)
+                    and any(part["text"].startswith(prefix) for prefix in self._CONTEXT_PREFIXES)
+                )
+            ]
+
+        # Serialize event to Firestore
         events_ref = self._events_collection(app_name, user_id, session_id)
         await events_ref.document(event.id).set(event_data)
 
