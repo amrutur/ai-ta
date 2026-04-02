@@ -63,11 +63,9 @@ class FirestoreSessionService(BaseSessionService):
         "{The context is:}",
         "{The topic content is:}",
         "{The question is:}",
-        "{The student's answer is}",
         "{The student's code output is}",
         "{The rubric is}",
         "{The rubric code output is}",
-        "{The instructor's answer is}",
         "{The instructor's code output is}",
     )
 
