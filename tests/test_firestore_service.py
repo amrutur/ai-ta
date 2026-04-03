@@ -182,6 +182,182 @@ class TestCreateSession:
         uuid.UUID(session.id)  # Will raise if not valid UUID
 
 
+class TestGetSession:
+    """Tests for get_session — the event-loading path that previously used
+    stream() which is incompatible with limit_to_last()."""
+
+    async def test_returns_none_when_session_missing(self, service):
+        """get_session should return None when the session doc doesn't exist."""
+        not_exists = _mock_doc(exists=False)
+        mock_ref = AsyncMock()
+        mock_ref.get = AsyncMock(return_value=not_exists)
+
+        with patch.object(service, "_session_ref", return_value=mock_ref):
+            result = await service.get_session(
+                app_name="app1", user_id="u1", session_id="s1",
+            )
+        assert result is None
+
+    async def test_loads_events_via_get_not_stream(self, service):
+        """Events should be loaded with get() (not stream()) so that
+        limit_to_last() works correctly with Firestore."""
+        session_doc = _mock_doc(exists=True, data={
+            "state": {}, "last_update_time": 1.0,
+        })
+        mock_session_ref = AsyncMock()
+        mock_session_ref.get = AsyncMock(return_value=session_doc)
+
+        event_data = {
+            "id": "e1", "author": "user", "timestamp": 1.0,
+            "invocation_id": "inv1",
+            "actions": {"state_delta": {}, "artifact_delta": {},
+                        "transfer_to_agent": None, "escalate": None,
+                        "requested_auth_configs": {}},
+        }
+        event_doc = _mock_doc(exists=True, data=event_data)
+
+        # The query chain: events_ref.order_by().limit_to_last().get()
+        mock_query = MagicMock()
+        mock_query.limit_to_last = MagicMock(return_value=mock_query)
+        mock_query.get = AsyncMock(return_value=[event_doc])
+
+        mock_events_ref = MagicMock()
+        mock_events_ref.order_by = MagicMock(return_value=mock_query)
+
+        with patch.object(service, "_session_ref", return_value=mock_session_ref), \
+             patch.object(service, "_events_collection", return_value=mock_events_ref), \
+             patch.object(service, "_get_app_state", new_callable=AsyncMock, return_value={}), \
+             patch.object(service, "_get_user_state", new_callable=AsyncMock, return_value={}):
+            session = await service.get_session(
+                app_name="app1", user_id="u1", session_id="s1",
+            )
+
+        # Verify get() was used (not stream())
+        mock_query.get.assert_awaited_once()
+        assert len(session.events) == 1
+
+    async def test_limit_to_last_applied_with_max_events(self, service):
+        """When max_events is set, limit_to_last should be applied to the query."""
+        service.max_events = 5
+
+        session_doc = _mock_doc(exists=True, data={
+            "state": {}, "last_update_time": 1.0,
+        })
+        mock_session_ref = AsyncMock()
+        mock_session_ref.get = AsyncMock(return_value=session_doc)
+
+        mock_query = MagicMock()
+        mock_query.limit_to_last = MagicMock(return_value=mock_query)
+        mock_query.get = AsyncMock(return_value=[])
+
+        mock_events_ref = MagicMock()
+        mock_events_ref.order_by = MagicMock(return_value=mock_query)
+
+        with patch.object(service, "_session_ref", return_value=mock_session_ref), \
+             patch.object(service, "_events_collection", return_value=mock_events_ref), \
+             patch.object(service, "_get_app_state", new_callable=AsyncMock, return_value={}), \
+             patch.object(service, "_get_user_state", new_callable=AsyncMock, return_value={}):
+            await service.get_session(
+                app_name="app1", user_id="u1", session_id="s1",
+            )
+
+        mock_query.limit_to_last.assert_called_once_with(5)
+
+    async def test_config_num_recent_events_overrides_max(self, service):
+        """GetSessionConfig.num_recent_events should override the default max_events."""
+        service.max_events = 10
+
+        session_doc = _mock_doc(exists=True, data={
+            "state": {}, "last_update_time": 1.0,
+        })
+        mock_session_ref = AsyncMock()
+        mock_session_ref.get = AsyncMock(return_value=session_doc)
+
+        mock_query = MagicMock()
+        mock_query.limit_to_last = MagicMock(return_value=mock_query)
+        mock_query.get = AsyncMock(return_value=[])
+
+        mock_events_ref = MagicMock()
+        mock_events_ref.order_by = MagicMock(return_value=mock_query)
+
+        config = GetSessionConfig(num_recent_events=3)
+
+        with patch.object(service, "_session_ref", return_value=mock_session_ref), \
+             patch.object(service, "_events_collection", return_value=mock_events_ref), \
+             patch.object(service, "_get_app_state", new_callable=AsyncMock, return_value={}), \
+             patch.object(service, "_get_user_state", new_callable=AsyncMock, return_value={}):
+            await service.get_session(
+                app_name="app1", user_id="u1", session_id="s1", config=config,
+            )
+
+        mock_query.limit_to_last.assert_called_once_with(3)
+
+    async def test_malformed_event_skipped_with_warning(self, service):
+        """Events that fail deserialization should be skipped, not crash."""
+        session_doc = _mock_doc(exists=True, data={
+            "state": {}, "last_update_time": 1.0,
+        })
+        mock_session_ref = AsyncMock()
+        mock_session_ref.get = AsyncMock(return_value=session_doc)
+
+        bad_event_doc = _mock_doc(exists=True, data={"garbage": True})
+
+        mock_query = MagicMock()
+        mock_query.limit_to_last = MagicMock(return_value=mock_query)
+        mock_query.get = AsyncMock(return_value=[bad_event_doc])
+
+        mock_events_ref = MagicMock()
+        mock_events_ref.order_by = MagicMock(return_value=mock_query)
+
+        with patch.object(service, "_session_ref", return_value=mock_session_ref), \
+             patch.object(service, "_events_collection", return_value=mock_events_ref), \
+             patch.object(service, "_get_app_state", new_callable=AsyncMock, return_value={}), \
+             patch.object(service, "_get_user_state", new_callable=AsyncMock, return_value={}):
+            session = await service.get_session(
+                app_name="app1", user_id="u1", session_id="s1",
+            )
+
+        assert len(session.events) == 0
+
+    async def test_after_timestamp_filters_events(self, service):
+        """GetSessionConfig.after_timestamp should filter out older events."""
+        session_doc = _mock_doc(exists=True, data={
+            "state": {}, "last_update_time": 5.0,
+        })
+        mock_session_ref = AsyncMock()
+        mock_session_ref.get = AsyncMock(return_value=session_doc)
+
+        def _event_doc(ts):
+            return _mock_doc(exists=True, data={
+                "id": f"e{ts}", "author": "user", "timestamp": float(ts),
+                "invocation_id": "inv1",
+                "actions": {"state_delta": {}, "artifact_delta": {},
+                            "transfer_to_agent": None, "escalate": None,
+                            "requested_auth_configs": {}},
+            })
+
+        mock_query = MagicMock()
+        mock_query.limit_to_last = MagicMock(return_value=mock_query)
+        mock_query.get = AsyncMock(return_value=[_event_doc(1), _event_doc(3), _event_doc(5)])
+
+        mock_events_ref = MagicMock()
+        mock_events_ref.order_by = MagicMock(return_value=mock_query)
+
+        config = GetSessionConfig(after_timestamp=2.5)
+
+        with patch.object(service, "_session_ref", return_value=mock_session_ref), \
+             patch.object(service, "_events_collection", return_value=mock_events_ref), \
+             patch.object(service, "_get_app_state", new_callable=AsyncMock, return_value={}), \
+             patch.object(service, "_get_user_state", new_callable=AsyncMock, return_value={}):
+            session = await service.get_session(
+                app_name="app1", user_id="u1", session_id="s1", config=config,
+            )
+
+        # Only events with timestamp >= 2.5 should remain (ts=3 and ts=5)
+        assert len(session.events) == 2
+        assert all(e.timestamp >= 2.5 for e in session.events)
+
+
 class TestDeleteSession:
     async def test_deletes_events_and_session(self, service, async_db):
         """delete_session should delete all events then the session doc."""
