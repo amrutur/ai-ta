@@ -240,7 +240,9 @@ class FirestoreSessionService(BaseSessionService):
             effective_limit = config.num_recent_events
         if effective_limit and effective_limit > 0:
             query = query.limit_to_last(effective_limit)
-        async for event_doc in query.stream():
+        # limit_to_last() is incompatible with stream(); use get() instead.
+        event_docs = await query.get()
+        for event_doc in event_docs:
             event_data = event_doc.to_dict()
             try:
                 event = Event.model_validate(event_data)
