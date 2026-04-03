@@ -13,7 +13,9 @@ subcollection for scalability.
 """
 
 import copy
+import json
 import logging
+import sys
 import time
 import uuid
 from typing import Any, Optional
@@ -43,11 +45,36 @@ class FirestoreSessionService(BaseSessionService):
             collection serves as the parent for all session data.
     """
 
+    # Default cap on events loaded per session.  Keeps the conversation
+    # history sent to the LLM within token limits (each event can carry a
+    # large prompt + response).  Only the most recent events are kept.
+    DEFAULT_MAX_EVENTS = 10
+
+    # Maximum total size (in bytes) for the serialized events loaded in
+    # get_session.  If the events exceed this, the oldest events are dropped
+    # until the total fits.  1 MB by default.
+    MAX_SESSION_EVENTS_BYTES = 1 * 1024 * 1024
+
+    # Prefixes that identify non-interaction context parts (RAG, rubric,
+    # question context, etc.).  These are stripped from events before
+    # persisting so that only the student–agent dialogue is captured.
+    _CONTEXT_PREFIXES = (
+        "{Relevant course material:}",
+        "{The context is:}",
+        "{The topic content is:}",
+        "{The question is:}",
+        "{The student's code output is}",
+        "{The rubric is}",
+        "{The rubric code output is}",
+        "{The instructor's code output is}",
+    )
+
     def __init__(self, db: AsyncClient, collection: str = "agent_sessions",
-                 course_handle: str = ""):
+                 course_handle: str = "", max_events: int | None = None):
         self.db = db
         self.collection = collection
         self.course_handle = course_handle
+        self.max_events = max_events if max_events is not None else self.DEFAULT_MAX_EVENTS
 
     # ---- internal helpers ----
 
@@ -201,16 +228,38 @@ class FirestoreSessionService(BaseSessionService):
 
         data = doc.to_dict()
 
-        # Load events from subcollection, ordered by timestamp
+        # Load events from subcollection, ordered by timestamp.
+        # To prevent unbounded conversation history from exceeding LLM token
+        # limits, only the most recent `self.max_events` events are loaded
+        # (unless the caller passes a GetSessionConfig that further narrows).
         events = []
         events_ref = self._events_collection(app_name, user_id, session_id)
-        async for event_doc in events_ref.order_by("timestamp").stream():
+        query = events_ref.order_by("timestamp")
+        effective_limit = self.max_events
+        if config and config.num_recent_events:
+            effective_limit = config.num_recent_events
+        if effective_limit and effective_limit > 0:
+            query = query.limit_to_last(effective_limit)
+        # limit_to_last() is incompatible with stream(); use get() instead.
+        event_docs = await query.get()
+        for event_doc in event_docs:
             event_data = event_doc.to_dict()
             try:
                 event = Event.model_validate(event_data)
                 events.append(event)
             except Exception as e:
                 logger.warning("Failed to deserialize event %s: %s", event_doc.id, e)
+
+        # --- Size guard: drop oldest events until total size is within limit ---
+        total_bytes = sum(sys.getsizeof(json.dumps(e.model_dump(mode="json", exclude_none=True))) for e in events)
+        if total_bytes > self.MAX_SESSION_EVENTS_BYTES:
+            logger.warning(
+                "Session %s events total %d bytes (limit %d). Truncating oldest events.",
+                session_id, total_bytes, self.MAX_SESSION_EVENTS_BYTES,
+            )
+            while events and total_bytes > self.MAX_SESSION_EVENTS_BYTES:
+                removed = events.pop(0)
+                total_bytes -= sys.getsizeof(json.dumps(removed.model_dump(mode="json", exclude_none=True)))
 
         session = Session(
             app_name=app_name,
@@ -221,14 +270,12 @@ class FirestoreSessionService(BaseSessionService):
             last_update_time=data.get("last_update_time", 0.0),
         )
 
-        # Apply GetSessionConfig filters
-        if config:
-            if config.num_recent_events:
-                session.events = session.events[-config.num_recent_events:]
-            if config.after_timestamp:
-                session.events = [
-                    e for e in session.events if e.timestamp >= config.after_timestamp
-                ]
+        # Apply remaining GetSessionConfig filters (num_recent_events is
+        # already handled at the query level above).
+        if config and config.after_timestamp:
+            session.events = [
+                e for e in session.events if e.timestamp >= config.after_timestamp
+            ]
 
         # Merge app/user state
         app_state = await self._get_app_state(app_name)
@@ -319,8 +366,19 @@ class FirestoreSessionService(BaseSessionService):
         user_id = session.user_id
         session_id = session.id
 
-        # Serialize event to Firestore
+        # Strip non-interaction context parts (RAG, rubric, question text,
+        # etc.) so only the student–agent dialogue is persisted.
         event_data = event.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if event_data.get("content") and event_data["content"].get("parts"):
+            event_data["content"]["parts"] = [
+                part for part in event_data["content"]["parts"]
+                if not (
+                    isinstance(part.get("text"), str)
+                    and any(part["text"].startswith(prefix) for prefix in self._CONTEXT_PREFIXES)
+                )
+            ]
+
+        # Serialize event to Firestore
         events_ref = self._events_collection(app_name, user_id, session_id)
         await events_ref.document(event.id).set(event_data)
 

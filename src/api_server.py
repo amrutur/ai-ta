@@ -46,7 +46,7 @@ from google_auth_oauthlib.flow import Flow
 from google.genai import types
 
 import config
-from agent_service import run_agent_and_get_response, score_question, evaluate, update_semaphore_limit, get_semaphore_limit
+from agent_service import run_agent_and_get_response, score_question, evaluate, update_semaphore_limit, get_semaphore_limit, truncate_text, truncate_prompt, MAX_OUTPUT_CHARS, MAX_TOTAL_PROMPT_CHARS
 
 from models import (
     QueryRequest, QueryResponse,
@@ -591,15 +591,15 @@ async def assist(query_body: AssistRequest, request: Request):
             if is_instructor:
                 # Provide full context so the agent can give instructor-level suggestions
                 if context:
-                    parts.append(types.Part.from_text(text="{The topic content is:} " + str(context)))
+                    parts.append(types.Part.from_text(text="{The topic content is:} " + truncate_text(str(context))))
                 if question:
-                    parts.append(types.Part.from_text(text="{The question is:} " + str(question)))
+                    parts.append(types.Part.from_text(text="{The question is:} " + truncate_text(str(question))))
                 if ta_chat:
-                    parts.append(types.Part.from_text(text="{The instructor asks:} " + str(ta_chat)))
+                    parts.append(types.Part.from_text(text="{The instructor asks:} " + truncate_text(str(ta_chat))))
                 if answer:
-                    parts.append(types.Part.from_text(text="{The instructor's answer is} " + str(answer)))
+                    parts.append(types.Part.from_text(text="{The instructor's answer is} " + truncate_text(str(answer))))
                 if output:
-                    parts.append(types.Part.from_text(text="{The instructor's code output is} " + json.dumps(output)))
+                    parts.append(types.Part.from_text(text="{The instructor's code output is} " + truncate_text(json.dumps(output), MAX_OUTPUT_CHARS)))
                 runner = config.get_runner("instructor", courses, course_handle)
             else:
                 # Student path — use cached rubric data without revealing the answer
@@ -616,23 +616,33 @@ async def assist(query_body: AssistRequest, request: Request):
                 rubric_output = courses[course_handle][notebook_id].get('outputs', {}).get(str(qnum))
 
                 if context is not None:
-                    parts.append(types.Part.from_text(text="{The context is:} " + str(context)))
-                parts.append(types.Part.from_text(text="{The question is:} " + str(question)))
-                parts.append(types.Part.from_text(text="{The student's answer is} " + str(answer)))
+                    parts.append(types.Part.from_text(text="{The context is:} " + truncate_text(str(context))))
+                parts.append(types.Part.from_text(text="{The question is:} " + truncate_text(str(question))))
+                parts.append(types.Part.from_text(text="{The student's answer is} " + truncate_text(str(answer))))
                 if output:
-                    parts.append(types.Part.from_text(text="{The student's code output is} " + json.dumps(output)))
-                parts.append(types.Part.from_text(text="{The student asks:} " + str(ta_chat)))
+                    parts.append(types.Part.from_text(text="{The student's code output is} " + truncate_text(json.dumps(output), MAX_OUTPUT_CHARS)))
+                parts.append(types.Part.from_text(text="{The student asks:} " + truncate_text(str(ta_chat))))
                 if rubric_answer is not None:
-                    parts.append(types.Part.from_text(text="{The rubric is} " + str(rubric_answer)))
+                    parts.append(types.Part.from_text(text="{The rubric is} " + truncate_text(str(rubric_answer))))
                 if rubric_output is not None:
-                    parts.append(types.Part.from_text(text="{The rubric code output is} " + str(rubric_output)))
+                    parts.append(types.Part.from_text(text="{The rubric code output is} " + truncate_text(str(rubric_output), MAX_OUTPUT_CHARS)))
                 runner = config.get_runner("student", courses, course_handle)
 
             # Prepend RAG material if available
             if rag_material:
                 parts.insert(0, types.Part.from_text(
-                    text="{Relevant course material:} " + rag_material
+                    text="{Relevant course material:} " + truncate_text(rag_material)
                 ))
+
+            # Final safety net: ensure total prompt size is within limits
+            total_chars = sum(len(p.text or "") for p in parts)
+            if total_chars > MAX_TOTAL_PROMPT_CHARS:
+                logging.warning("Total prompt size %d chars exceeds limit %d. Truncating largest parts.", total_chars, MAX_TOTAL_PROMPT_CHARS)
+                # Truncate the largest parts proportionally
+                ratio = MAX_TOTAL_PROMPT_CHARS / total_chars
+                for idx, p in enumerate(parts):
+                    if p.text and len(p.text) > 10000:
+                        parts[idx] = types.Part.from_text(text=truncate_text(p.text, int(len(p.text) * ratio)))
 
             content = types.Content(role="user", parts=parts)
 
@@ -749,10 +759,10 @@ async def regrade_answer(query_body: RegradeAnswerRequest, request: Request):
 
     rubric_question_marks = rubric_question_data.get('marks', 10.0)
     rubric_answer = rubric_answers.get(qnum_str, '')
-    rubric_answer_str = " ".join(
+    rubric_answer_str = truncate_text(" ".join(
         f"({float(a.get('percent'))/100.0*rubric_question_marks}) {a.get('component', '')}"
         for a in rubric_answer
-    )
+    ))
 
     try:
         # Fetch student's answers and existing grader response
@@ -761,10 +771,10 @@ async def regrade_answer(query_body: RegradeAnswerRequest, request: Request):
             raise HTTPException(status_code=404, detail=f"No submitted answers found for student '{student_id}' notebook '{notebook_id}'.")
 
         student_answer = answers.get(qnum_str)
-        student_answer_str = " ".join(
+        student_answer_str = truncate_text(" ".join(
             f"{a.get('component', '')}"
             for a in student_answer
-        ) if student_answer else "No answer."
+        )) if student_answer else "No answer."
 
         # Fetch existing grader response for context
         grader_response = await fetch_grader_response(config.db, course_handle, notebook_id, student_id)
@@ -903,15 +913,15 @@ async def eval_submission(query_body: EvalRequest, request: Request):
                 rubric_question = rubric_questions.get(qnum_str, '').get('question', '')
                 rubric_question_marks = rubric_questions.get(qnum_str).get('marks', 10.0)
                 rubric_answer = rubric_answers.get(qnum_str, '')
-                rubric_answer_str = " ".join(
+                rubric_answer_str = truncate_text(" ".join(
                     f"({float(a.get('percent'))/100.0*rubric_question_marks}) {a.get('component', '')}"
                     for a in rubric_answer
-                )
+                ))
                 logging.info(f"Grading Q{qnum_str}: rubric question='{rubric_question}', rubric answer='{rubric_answer_str}'")
-                student_answer_str = " ".join(
+                student_answer_str = truncate_text(" ".join(
                     f"{a.get('component', '')}"
                     for a in student_answer
-                ) if student_answer else ""
+                )) if student_answer else ""
 
                 if not rubric_question:
                     logging.error(f"No rubric question found for Q{qnum_str}. Skipping.")

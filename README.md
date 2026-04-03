@@ -41,7 +41,7 @@ firestore/
 │       ├── folder_name (GCS path)
 │       ├── isactive_tutor (feature flag — tutoring toggle)
 │       ├── student_rate_limit, student_rate_limit_window (per-student rate limiting)
-│       ├── ai_model, instructor_prompt, tutor_prompt, scoring_prompt (course-specific AI config)
+│       ├── ai_model, instructor_assist_prompt, student_assist_prompt, scoring_assist_prompt (course-specific AI config)
 │       │
 │       ├── Notebooks/ (subcollection — rubrics & instructor content)
 │       │   └── {notebook_id}/
@@ -375,6 +375,7 @@ The API supports two authentication methods:
 | `/upload_course_materials` | GET | — | Drag-and-drop file upload page for course PDFs |
 | `/validate_course_access` | GET | Query params | Validate instructor access to a course |
 | `/get_upload_url` | POST | JSON body | Generate signed GCS URL for direct browser upload |
+| `/upload_file` | POST | FormData | Upload a file directly to GCS (avoids CORS issues with signed URLs) |
 | `/build_course_index` | POST | `BuildCourseIndexRequest` | Build RAG vector index for course PDF materials |
 | `/update_course_config` | POST | `UpdateCourseConfigRequest` | Update course config (model, tutor/eval toggle, rate limits) |
 | `/rate_limit_status` | POST | `TutorInteractionRequest` | View per-student rate limit usage for a course |
@@ -540,6 +541,29 @@ The system includes a Retrieval-Augmented Generation pipeline for grounding agen
 - **Storage**: Firestore native `Vector` type in `rag_chunks` subcollection
 - **Retrieval**: Cosine similarity search via Firestore `find_nearest()`
 - **Integration**: Retrieved context is injected into `/assist` and `/eval` agent prompts
+
+### Testing & Code Quality
+
+The project uses `pytest` for testing and `ruff` for linting and formatting. Dev dependencies are in `requirements-dev.txt`.
+
+```bash
+# Install dev dependencies
+make install
+
+# Run the full test suite
+make test
+
+# Lint source and test files
+make lint
+
+# Auto-format source and test files
+make format
+
+# Remove Python cache files
+make clean
+```
+
+Tests are located in the `tests/` directory and cover API endpoints, agent orchestration, authentication, database operations, RAG pipeline, rate limiting, and more. Configuration is in `pyproject.toml`.
 
 ### Local Development with ngrok
 
