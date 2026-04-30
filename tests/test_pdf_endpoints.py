@@ -475,6 +475,121 @@ class TestGradePdfAssignment:
 # ---------------------------------------------------------------------------
 
 
+class TestDownloadMarks:
+    def test_requires_auth(self, client):
+        resp = client.get(
+            "/download_marks",
+            params={"institution_id": "iisc", "term_id": "2025-26",
+                    "course_id": "cp260", "notebook_id": "lab1"},
+        )
+        assert resp.status_code == 401
+
+    def test_csv_for_all_students(self, client):
+        ch = _setup_pdf_course()
+        try:
+            marks = [
+                {"student_id": "alice@iisc.ac.in", "total_marks": 42.0},
+                {"student_id": "bob@iisc.ac.in", "total_marks": -1},   # submitted, ungraded
+                {"student_id": "carol@iisc.ac.in", "total_marks": None}, # never submitted
+            ]
+            with patch("api_server.get_marks_list", new_callable=AsyncMock,
+                       return_value=(50.0, marks)), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={"alice@iisc.ac.in": "Alice Smith",
+                                     "bob@iisc.ac.in": "Bob Jones",
+                                     "carol@iisc.ac.in": "Carol Lee"}):
+                resp = client.get(
+                    "/download_marks",
+                    params={"institution_id": "iisc", "term_id": "2025-26",
+                            "course_id": "cp260", "notebook_id": "lab1"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/csv")
+            assert 'attachment' in resp.headers["content-disposition"]
+            body = resp.text
+            assert "student_id,name,total_marks,max_marks" in body
+            assert "alice@iisc.ac.in,Alice Smith,42.0,50.0" in body
+            assert "bob@iisc.ac.in,Bob Jones,not_graded,50.0" in body
+            assert "carol@iisc.ac.in,Carol Lee,,50.0" in body
+        finally:
+            _teardown(ch)
+
+    def test_csv_for_one_student(self, client):
+        ch = _setup_pdf_course()
+        try:
+            marks = [
+                {"student_id": "alice@iisc.ac.in", "total_marks": 42.0},
+                {"student_id": "bob@iisc.ac.in", "total_marks": 30.0},
+            ]
+            with patch("api_server.get_marks_list", new_callable=AsyncMock,
+                       return_value=(50.0, marks)), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={"alice@iisc.ac.in": "Alice", "bob@iisc.ac.in": "Bob"}):
+                resp = client.get(
+                    "/download_marks",
+                    params={"institution_id": "iisc", "term_id": "2025-26",
+                            "course_id": "cp260", "notebook_id": "lab1",
+                            "student_id": "alice@iisc.ac.in"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            body = resp.text
+            assert "alice@iisc.ac.in" in body
+            assert "bob@iisc.ac.in" not in body
+        finally:
+            _teardown(ch)
+
+
+class TestDownloadGraderResponse:
+    def test_requires_auth(self, client):
+        resp = client.get(
+            "/download_grader_response",
+            params={"institution_id": "iisc", "term_id": "2025-26",
+                    "course_id": "cp260", "notebook_id": "lab1"},
+        )
+        assert resp.status_code == 401
+
+    def test_json_keyed_by_student(self, client):
+        ch = _setup_pdf_course()
+        try:
+            student_list = ["alice@iisc.ac.in", "bob@iisc.ac.in"]
+
+            async def fake_fetch(db, course_handle, notebook_id, student_id):
+                if student_id == "alice@iisc.ac.in":
+                    return {
+                        "student_id": "alice@iisc.ac.in",
+                        "total_marks": 42.0,
+                        "max_marks": 50.0,
+                        "feedback": {"overall": {"marks": 42.0, "response": "good"}},
+                    }
+                return None  # bob has no graded response yet
+
+            with patch("api_server.get_student_list", new_callable=AsyncMock,
+                       return_value=student_list), \
+                 patch("api_server.fetch_grader_response", side_effect=fake_fetch), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={"alice@iisc.ac.in": "Alice", "bob@iisc.ac.in": "Bob"}):
+                resp = client.get(
+                    "/download_grader_response",
+                    params={"institution_id": "iisc", "term_id": "2025-26",
+                            "course_id": "cp260", "notebook_id": "lab1"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("application/json")
+            assert "attachment" in resp.headers["content-disposition"]
+            data = resp.json()
+            assert "alice@iisc.ac.in" in data
+            assert data["alice@iisc.ac.in"]["name"] == "Alice"
+            assert data["alice@iisc.ac.in"]["total_marks"] == 42.0
+            assert data["alice@iisc.ac.in"]["grader_response"]["overall"]["marks"] == 42.0
+            # Bob had no feedback — should be omitted from the dict.
+            assert "bob@iisc.ac.in" not in data
+        finally:
+            _teardown(ch)
+
+
 class TestGradeAssignmentDispatch:
     def test_requires_auth(self, client):
         resp = client.post(

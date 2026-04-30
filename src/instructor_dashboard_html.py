@@ -265,9 +265,33 @@ const SERVICES = [
     desc: 'Send each student their grade by email. "All" or one specific student. Streams progress.',
     method: 'POST', url: '/notify_student_grades', encoding: 'json', streaming: true,
     fields: [
-      {name: 'notebook_id', label: 'Notebook / assignment ID', type: 'text', required: true},
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
       {name: 'student_id', label: 'Student email or "All"', type: 'text', required: true, value: 'All'},
       {name: 'do_resend', label: 'Resend even if already notified', type: 'checkbox'},
+    ],
+  },
+  {
+    id: 'download_marks',
+    section: 'Grades',
+    label: 'Download marks (CSV)',
+    desc: 'Download a CSV with one row per student: student_id, name, total_marks, max_marks.',
+    method: 'GET', url: '/download_marks', encoding: 'download',
+    downloadFilename: (vals) => `marks_${vals.notebook_id || 'assignment'}.csv`,
+    fields: [
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
+      {name: 'student_id', label: 'Student email or "All"', type: 'text', required: true, value: 'All'},
+    ],
+  },
+  {
+    id: 'download_grader_response',
+    section: 'Grades',
+    label: 'Download grader response (JSON)',
+    desc: 'Download a JSON file keyed by student email, with name, total_marks, max_marks, and the full grader_response for each.',
+    method: 'GET', url: '/download_grader_response', encoding: 'download',
+    downloadFilename: (vals) => `grader_response_${vals.notebook_id || 'assignment'}.json`,
+    fields: [
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
+      {name: 'student_id', label: 'Student email or "All"', type: 'text', required: true, value: 'All'},
     ],
   },
 
@@ -504,6 +528,30 @@ async function onSubmit(e) {
   submitBtn.disabled = true;
 
   try {
+    if (svc.encoding === 'download') {
+      // GET request with query params; trigger a browser download via Blob.
+      const vals = collectFieldValues(form, svc);
+      const url = buildQueryUrl(svc.url, vals);
+      const r = await fetch(url, { method: 'GET' });
+      if (!r.ok) {
+        let detail = '';
+        try { detail = (await r.json()).detail || ''; } catch { detail = await r.text(); }
+        appendOut(out, 'err', `HTTP ${r.status}: ${detail}`);
+        return;
+      }
+      const blob = await r.blob();
+      const fname = svc.downloadFilename ? svc.downloadFilename(vals) : 'download';
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      appendOut(out, 'ok', `Downloaded ${fname} (${blob.size} bytes).`);
+      return;
+    }
+
     const body = svc.encoding === 'multipart'
       ? buildMultipart(form, svc)
       : buildJsonBody(form, svc);
@@ -536,6 +584,30 @@ async function onSubmit(e) {
   } finally {
     submitBtn.disabled = false;
   }
+}
+
+function collectFieldValues(form, svc) {
+  // Plain key-value collection for GET/download. Always includes course IDs.
+  const vals = {
+    institution_id: state.course.institution_id,
+    term_id: state.course.term_id,
+    course_id: state.course.course_id,
+  };
+  for (const f of svc.fields) {
+    const el = form.elements[f.name];
+    if (!el) continue;
+    if (f.type === 'checkbox') vals[f.name] = el.checked ? 'true' : 'false';
+    else if (el.value !== '') vals[f.name] = el.value;
+  }
+  return vals;
+}
+
+function buildQueryUrl(base, vals) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(vals)) {
+    if (v !== undefined && v !== null && v !== '') params.append(k, v);
+  }
+  return base + '?' + params.toString();
 }
 
 function buildJsonBody(form, svc) {

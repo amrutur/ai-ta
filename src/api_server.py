@@ -36,7 +36,7 @@ import uuid
 from typing import Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File, Form
-from fastapi.responses import  HTMLResponse, StreamingResponse
+from fastapi.responses import  HTMLResponse, StreamingResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 import uvicorn
@@ -1898,6 +1898,115 @@ async def upload_rubric_api(
 
 
 MAX_RUBRIC_PDF_SIZE_BYTES = 20 * 1024 * 1024
+
+
+@app.get("/download_marks")
+async def download_marks(
+    request: Request,
+    institution_id: str,
+    term_id: str,
+    course_id: str,
+    notebook_id: str,
+    student_id: str = "All",
+):
+    """Download a CSV of marks for an assignment.
+
+    Columns: student_id, name, total_marks, max_marks. ``student_id="All"``
+    returns every enrolled student; otherwise just the named one. Returned
+    as ``text/csv`` with ``Content-Disposition: attachment`` so the browser
+    saves it as a file. Only accessible to instructors / TAs / admins.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can download marks.")
+
+    max_marks, marks_list = await get_marks_list(config.db, course_handle, notebook_id)
+    student_directory = await get_student_directory(config.db, course_handle)
+
+    if student_id.lower() != "all":
+        marks_list = [m for m in marks_list if m.get('student_id') == student_id]
+
+    import csv
+    import io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["student_id", "name", "total_marks", "max_marks"])
+    for row in marks_list:
+        sid = row.get('student_id', '')
+        # total_marks: -1 means submitted-but-not-graded; None means not submitted.
+        tm = row.get('total_marks')
+        tm_str = '' if tm is None else ('not_graded' if tm == -1 else str(tm))
+        writer.writerow([sid, student_directory.get(sid, ''), tm_str, max_marks if max_marks is not None else ''])
+
+    filename = f"marks_{course_handle}_{notebook_id}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/download_grader_response")
+async def download_grader_response_api(
+    request: Request,
+    institution_id: str,
+    term_id: str,
+    course_id: str,
+    notebook_id: str,
+    student_id: str = "All",
+):
+    """Download a JSON document of grader responses for an assignment.
+
+    Format: a dict keyed by ``student_id`` (email), with each value being
+    ``{name, total_marks, max_marks, grader_response}``. ``student_id="All"``
+    returns every student who has a grader_response on this assignment;
+    otherwise just the named one. Returned as ``application/json`` with
+    ``Content-Disposition: attachment``. Instructors / TAs / admins only.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can download grader responses.")
+
+    if student_id.lower() == "all":
+        student_ids = await get_student_list(config.db, course_handle)
+    else:
+        student_ids = [student_id]
+
+    student_directory = await get_student_directory(config.db, course_handle)
+
+    out: dict[str, Any] = {}
+    for sid in student_ids:
+        try:
+            gr = await fetch_grader_response(config.db, course_handle, notebook_id, sid)
+        except HTTPException:
+            # Skip students who don't have a grader response yet (e.g. ungraded
+            # or never enrolled — fetch_grader_response raises 404 for missing).
+            continue
+        if gr is None:
+            continue
+        out[sid] = {
+            "name": student_directory.get(sid, ''),
+            "total_marks": gr.get('total_marks'),
+            "max_marks": gr.get('max_marks'),
+            "grader_response": gr.get('feedback'),
+        }
+
+    filename = f"grader_response_{course_handle}_{notebook_id}.json"
+    return Response(
+        content=json.dumps(out, indent=2, default=str),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/upload_rubric_file", response_model=AddRubricResponse)
