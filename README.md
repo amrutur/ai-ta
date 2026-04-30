@@ -45,17 +45,28 @@ firestore/
 │       │
 │       ├── Notebooks/ (subcollection — rubrics & instructor content)
 │       │   └── {notebook_id}/
-│       │       ├── max_marks, context, questions, answers, outputs
-│       │       ├── isactive_eval (per-notebook evaluation toggle)
-│       │       └── rag_chunks/ (subcollection — vector embeddings)
-│       │           └── {auto-id}/ (source_file, chunk_index, text, embedding)
+│       │       ├── assignment_type ("notebook" | "pdf", default "notebook")
+│       │       ├── max_marks, isactive_eval
+│       │       ├── (notebook mode) context, questions, answers, outputs
+│       │       ├── (pdf mode) problem_statement, rubric_text, sample_graded_response
+│       │       ├── rag_chunks/ (subcollection — vector embeddings)
+│       │       │   └── {auto-id}/ (source_file, chunk_index, text, embedding)
+│       │       └── pdf_submissions/ (subcollection — per-PDF tracking, pdf mode only)
+│       │           └── {drive_file_id}/
+│       │               ├── drive_modified_time, gcs_uri, original_filename
+│       │               ├── extracted_authors, student_ids, ingested_at
+│       │               ├── total_marks, max_marks, grader_response, graded_at
 │       │
 │       └── Students/ (subcollection)
 │           └── {student_email}/
 │               ├── name, initialized, created_at
+│               ├── (placeholder records from PDF ingest) pending_review,
+│               │   created_from_drive_file_id
 │               └── Notebooks/ (subcollection — submissions & grades)
 │                   └── {notebook_id}/
-│                       ├── answer_notebook, answer_hash, submitted_at
+│                       ├── (notebook mode) answer_notebook, answer_hash, submitted_at
+│                       ├── (pdf mode) assignment_type, drive_file_id, gcs_uri,
+│                       │   co_authors, original_filename, submitted_at
 │                       ├── total_marks, max_marks, graded_at
 │                       ├── grader_response, graded_json
 │                       ├── email_notified_at
@@ -77,7 +88,8 @@ firestore/
 
 ### For Instructors
 - **Instructor AI Assistant**: Verify content, create questions, review rubrics, and get suggestions
-- **Rubric Management**: Upload scoring rubrics to guide the AI grading agent
+- **Rubric Management**: Upload scoring rubrics to guide the AI grading agent (notebook or PDF mode)
+- **PDF Assignments**: Ingest student-submitted PDF reports from a shared Drive folder, grade them holistically via Gemini multimodal (figures/tables/plots are visible to the model), and regrade with optional student contention. See [PDF Assignment Mode](#pdf-assignment-mode) below.
 - **Course Materials Upload**: Drag-and-drop browser interface for uploading PDFs to GCS
 - **RAG Index Building**: Build vector search indices over uploaded course materials
 - **Tutor & Eval Controls**: Dynamically enable/disable the tutoring endpoint per course and evaluation per notebook
@@ -329,6 +341,76 @@ h) you can delete this preamble for the student.
 4. authentication: the system relies on Single sign on authentication - either with gmail or your institutional email system - provided they offer a SSO service which google can connect to.
 
 
+### PDF Assignment Mode
+
+For courses where students submit PDF reports (e.g. lab write-ups, project reports) instead of working in Colab notebooks, the platform supports a PDF-assignment grading flow that reuses the same course/student/grade data model.
+
+**1. Upload a PDF rubric** — `POST /upload_rubric` with `assignment_type: "pdf"`. The PDF rubric is holistic (one rubric per entire report), not per-question:
+
+```json
+{
+  "institution_id": "iisc",
+  "term_id": "2025-26",
+  "course_id": "cp260",
+  "notebook_id": "lab1",
+  "max_marks": 50.0,
+  "assignment_type": "pdf",
+  "problem_statement": "Build a single-threaded TCP echo server in C and demonstrate it handling N clients...",
+  "rubric_text": "Correctness 30 marks (10 for protocol handling, 10 for concurrency, 10 for error paths). Code quality 10 marks. Report writeup 10 marks.",
+  "sample_graded_response": "Optional: paste a previously-graded response here as a one-shot example for the scoring agent."
+}
+```
+
+**2. Share the Drive folder with the service account** — Students submit their PDFs (e.g. via Google Form file uploads or by dropping files into a shared Drive folder). The instructor takes the resulting Drive folder, right-clicks → Share, and grants **Viewer** access to the platform service account email (the `client_email` in your service-account JSON / `SERVICE_ACCOUNT_EMAIL` env var).
+
+**3. Ingest** — `POST /ingest_pdf_submissions`:
+
+```json
+{
+  "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+  "notebook_id": "lab1",
+  "drive_folder_url": "https://drive.google.com/drive/folders/<FOLDER_ID>"
+}
+```
+
+For each PDF in the folder the server:
+- Skips files that are already ingested with the same `modifiedTime` (idempotent re-runs).
+- Downloads the PDF, uploads it to GCS at `{bucket}/{course_handle}/submissions/{notebook_id}/{drive_file_id}.pdf`.
+- Extracts author names from the cover page via Gemini and fuzzy-matches them against enrolled students.
+- For unmatched names, creates a placeholder student record at `Students/{slug}@pending.local` with `pending_review: true`. The instructor can clean these up later (e.g. merge or delete in Firestore).
+- Joint submissions (multiple authors on one PDF) get one mirror record per author, all linked to the same `drive_file_id` and `co_authors` list.
+
+The response is `{ingested: [...], skipped: [...], failed: [...]}` so the instructor can spot any oversize / inaccessible files.
+
+**4. Grade** — `POST /grade_pdf_assignment` streams ndjson progress while running the scoring agent on every ingested PDF concurrently:
+
+```json
+{ "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+  "notebook_id": "lab1", "do_regrade": false }
+```
+
+The scoring agent receives the PDF as a multimodal Vertex AI input (via `gs://` URI), so figures, tables, and plots are considered alongside the rubric, problem statement, sample response, and RAG-retrieved course material. The grade is written to the per-PDF tracking doc and to every co-author's mirror doc — so `/fetch_marks_list`, `/fetch_grader_response`, and `/notify_student_grades` work unchanged.
+
+Idempotency: submissions with `graded_at >= drive_modified_time` are skipped unless `do_regrade=true`.
+
+**5. Regrade individual submissions** — `POST /regrade_pdf_submission` for cases where a student contests their grade:
+
+```json
+{ "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+  "notebook_id": "lab1", "student_id": "alice@iisc.ac.in",
+  "do_regrade": true,
+  "student_contends": "I implemented retry logic on lines 80-95 — please re-check section 3 of my report."
+}
+```
+
+The previous response and the contention text are appended to the prompt; the audit trail is preserved in the new `grader_response`.
+
+**Limits & notes**
+- Maximum PDF size during ingest is 50 MB. Larger files are reported in `failed` rather than silently truncated.
+- OneDrive folders are not currently supported — only Google Drive folders shared with the service account.
+- The PDF rubric is holistic. If you need per-question grading on a PDF report, structure your `rubric_text` as enumerated criteria; the agent will reason about each criterion.
+
+
 ## API Endpoints
 
 API endpoints can be tested by connecting to `https://AI_tutor_server_url/docs`
@@ -379,6 +461,9 @@ The API supports two authentication methods:
 | `/build_course_index` | POST | `BuildCourseIndexRequest` | Build RAG vector index for course PDF materials |
 | `/update_course_config` | POST | `UpdateCourseConfigRequest` | Update course config (model, tutor/eval toggle, rate limits) |
 | `/rate_limit_status` | POST | `TutorInteractionRequest` | View per-student rate limit usage for a course |
+| `/ingest_pdf_submissions` | POST | `IngestPdfSubmissionsRequest` | Ingest PDF reports from a shared Drive folder for a PDF assignment |
+| `/grade_pdf_assignment` | POST | `GradePdfAssignmentRequest` | Stream-grade every ingested PDF submission for a notebook |
+| `/regrade_pdf_submission` | POST | `RegradePdfSubmissionRequest` | Regrade a single student's PDF submission, optionally with contention |
 
 ### Admin Endpoints (Requires Admin Authentication)
 
@@ -482,13 +567,14 @@ ai-ta/
 │   ├── config.py            # Configuration, secrets, and service initialization
 │   ├── models.py            # Pydantic request/response models
 │   ├── auth.py              # OAuth helpers, JWT creation/verification
-│   ├── database.py          # Firestore CRUD (courses, students, rubrics, grades)
+│   ├── database.py          # Firestore CRUD (courses, students, rubrics, grades, PDF submissions)
 │   ├── firestore_service.py # Custom async Firestore session service for ADK
 │   ├── agent.py             # AI agent definitions (instructor, tutor, scoring)
-│   ├── agent_service.py     # Agent orchestration and scoring logic
+│   ├── agent_service.py     # Agent orchestration and scoring logic (notebook + PDF)
 │   ├── rate_limiter.py       # Per-student sliding-window rate limiter
 │   ├── rag.py               # RAG pipeline (PDF chunking, embedding, retrieval)
-│   ├── drive_utils.py       # Google Drive / Colab notebook utilities
+│   ├── drive_utils.py       # Google Drive helpers (file + folder access via service account)
+│   ├── pdf_utils.py         # PDF text extraction, author detection, fuzzy student matching
 │   ├── storage_utils.py     # GCS upload and signed URL utilities
 │   ├── email_service.py     # Gmail SMTP email service
 │   ├── aita_exceptions.py   # Custom exception classes
@@ -499,11 +585,14 @@ ai-ta/
 │   ├── test_agent_service.py    # Agent execution tests
 │   ├── test_auth.py             # Auth logic tests
 │   ├── test_database.py         # Database operations tests
-│   ├── test_drive_utils.py      # Google Drive utility tests
+│   ├── test_drive_utils.py      # Google Drive utility tests (file + folder access)
 │   ├── test_email_service.py    # Email service tests
 │   ├── test_exceptions.py       # Exception tests
 │   ├── test_firestore_service.py # Session service tests
 │   ├── test_models.py           # Pydantic model tests
+│   ├── test_pdf_database.py     # PDF-assignment database helper tests
+│   ├── test_pdf_endpoints.py    # PDF-assignment endpoint tests (ingest/grade/regrade)
+│   ├── test_pdf_utils.py        # PDF text + author extraction + student matching tests
 │   ├── test_rag.py              # RAG pipeline tests
 │   ├── test_rate_limiter.py     # Rate limiter tests
 │   └── test_storage_utils.py    # GCS utility tests
