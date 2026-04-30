@@ -147,16 +147,75 @@ class ListResponse(BaseModel):
 class AddRubricRequest(BaseModel):
     notebook_id: str
     max_marks: float
-    context: Dict[str,Any]
-    questions: Dict[str,Any]
-    answers: Dict[str, Any]
-    outputs: Dict[str,Any]
     institution_id: str
     term_id: str
     course_id: str
- 
+    # Notebook-mode rubric (default). Optional so PDF-mode requests can omit them.
+    context: Dict[str, Any] | None = None
+    questions: Dict[str, Any] | None = None
+    answers: Dict[str, Any] | None = None
+    outputs: Dict[str, Any] | None = None
+    # PDF-mode rubric. Required when assignment_type == "pdf".
+    assignment_type: str = "notebook"  # "notebook" | "pdf"
+    problem_statement: str | None = None
+    rubric_text: str | None = None
+    sample_graded_response: str | None = None
+
 class AddRubricResponse(BaseModel):
     response: str
+
+
+class IngestPdfSubmissionsRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    drive_folder_url: str
+
+class IngestedPdfRecord(BaseModel):
+    drive_file_id: str
+    filename: str
+    authors: List[str]
+    student_ids: List[str]
+    placeholder_student_ids: List[str]
+    gcs_uri: str
+
+class SkippedPdfRecord(BaseModel):
+    drive_file_id: str
+    filename: str
+    reason: str
+
+class FailedPdfRecord(BaseModel):
+    drive_file_id: str | None = None
+    filename: str | None = None
+    error: str
+
+class IngestPdfSubmissionsResponse(BaseModel):
+    ingested: List[IngestedPdfRecord] = []
+    skipped: List[SkippedPdfRecord] = []
+    failed: List[FailedPdfRecord] = []
+
+
+class GradePdfAssignmentRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    do_regrade: bool = False
+
+
+class RegradePdfSubmissionRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    student_id: str
+    do_regrade: bool = True
+    student_contends: str = ""
+
+class RegradePdfSubmissionResponse(BaseModel):
+    response: str
+    marks: float
 
 class GradeNotebookRequest(BaseModel):
     student_id: str  # specific student email or "All" to grade all students
