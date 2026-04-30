@@ -29,7 +29,9 @@ Written with lots of help from google's gemini !
 
 import os
 import asyncio
+import hashlib
 import logging
+import re
 import traceback
 import json
 import uuid
@@ -68,6 +70,7 @@ from models import (
     DebugDriveAccessRequest, DebugDriveAccessResponse,
     DebugPdfAuthorsRequest, DebugPdfAuthorsResponse, DebugPdfAuthorsRosterMatch,
     ReassignPdfSubmissionRequest, ReassignPdfSubmissionResponse,
+    UploadPdfSubmissionResponse,
     IngestPdfSubmissionsRequest, IngestPdfSubmissionsResponse,
     IngestedPdfRecord, SkippedPdfRecord, FailedPdfRecord,
     GradePdfAssignmentRequest,
@@ -2870,6 +2873,126 @@ async def _resolve_pdf_authors(
     seen: set[str] = set()
     deduped = [s for s in student_ids if not (s in seen or seen.add(s))]
     return extracted, deduped, placeholders
+
+
+@app.post("/upload_pdf_submission", response_model=UploadPdfSubmissionResponse)
+async def upload_pdf_submission(
+    request: Request,
+    institution_id: str = Form(...),
+    term_id: str = Form(...),
+    course_id: str = Form(...),
+    notebook_id: str = Form(...),
+    student_ids: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload a single PDF directly with explicit student attribution.
+
+    Escape hatch for the cases where /ingest_pdf_submissions doesn't work
+    cleanly: a Drive folder isn't shared, the cover page format defeats
+    author extraction, or you just have a PDF on disk and the students'
+    emails to attribute it to. Bypasses Drive listing AND author
+    extraction entirely.
+
+    The PDF is uploaded to GCS at the same path the bulk ingest uses,
+    keyed by a SHA-256 of its contents (so re-uploading the same PDF is
+    idempotent — it overwrites the same tracking doc rather than
+    creating a duplicate). After upload, run /grade_assignment to grade
+    it, exactly as you would after a bulk ingest.
+
+    ``student_ids`` is a single string of one or more emails separated
+    by commas or whitespace. Any email not yet on the course is
+    auto-enrolled (name=email; instructor can refine via roster upload).
+
+    Instructor / TA / admin only.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can upload submissions.")
+
+    rubric = courses[course_handle].get(notebook_id)
+    if not rubric:
+        raise HTTPException(status_code=404, detail=f"Notebook '{notebook_id}' has no rubric — upload a rubric first.")
+    if not _is_pdf_rubric(rubric):
+        raise HTTPException(status_code=400, detail=f"Notebook '{notebook_id}' is not a PDF-submission assignment.")
+
+    if (file.content_type or '') not in ('application/pdf', 'application/x-pdf'):
+        raise HTTPException(status_code=400, detail=f"Expected a PDF file (got content_type={file.content_type!r}).")
+
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(pdf_bytes) > MAX_PDF_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"PDF too large ({len(pdf_bytes)} bytes; max {MAX_PDF_SIZE_BYTES}).")
+
+    # Parse + validate emails (textarea / form field is one string).
+    raw_emails = re.split(r"[,\s]+", student_ids.strip())
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_emails:
+        if not raw:
+            continue
+        email = raw.strip().lower()
+        if "@" not in email:
+            raise HTTPException(status_code=400, detail=f"Not a valid email: {raw!r}")
+        if email not in seen:
+            seen.add(email)
+            cleaned.append(email)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="At least one student email is required.")
+
+    # Synthesize a stable drive_file_id from the content hash. Re-uploading
+    # the same PDF therefore overwrites the same tracking doc — idempotent
+    # in the same way Drive ingest is idempotent on (drive_file_id, modified_time).
+    sha = hashlib.sha256(pdf_bytes).hexdigest()
+    drive_file_id = f"manual-{sha[:16]}"
+    modified_time = datetime.datetime.utcnow().isoformat() + "Z"
+    filename = file.filename or f"{drive_file_id}.pdf"
+
+    destination_path = f"{course_handle}/submissions/{notebook_id}/{drive_file_id}.pdf"
+    try:
+        gcs_uri = await asyncio.to_thread(
+            upload_blob, config.bucket_name, destination_path, pdf_bytes, "application/pdf",
+        )
+    except Exception as e:
+        logging.error(f"Failed to upload manual PDF to GCS: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to upload PDF to GCS: {e}")
+
+    # Auto-enrol any student not already on the course (name=email fallback —
+    # instructor can refine via roster upload).
+    student_directory = await get_student_directory(config.db, course_handle)
+    auto_added: list[str] = []
+    for email in cleaned:
+        if email not in student_directory:
+            await upsert_student(config.db, course_handle, email=email, name=email)
+            auto_added.append(email)
+
+    await upsert_pdf_submission(
+        config.db, course_handle, notebook_id,
+        drive_file_id=drive_file_id,
+        drive_modified_time=modified_time,
+        gcs_uri=gcs_uri,
+        original_filename=filename,
+        extracted_authors=[],   # manual upload — no extraction was attempted
+        student_ids=cleaned,
+    )
+
+    logging.info(
+        f"User {user_gmail} manually uploaded PDF '{filename}' to "
+        f"{course_handle}/{notebook_id} (drive_file_id={drive_file_id}, "
+        f"students={cleaned}, auto_added={auto_added})"
+    )
+    return UploadPdfSubmissionResponse(
+        drive_file_id=drive_file_id,
+        filename=filename,
+        gcs_uri=gcs_uri,
+        student_ids=cleaned,
+        auto_added_students=auto_added,
+    )
 
 
 @app.post("/ingest_pdf_submissions", response_model=IngestPdfSubmissionsResponse)

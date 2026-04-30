@@ -210,6 +210,19 @@ const SERVICES = [
     ],
   },
   {
+    id: 'upload_pdf_one',
+    section: 'PDF submissions',
+    label: 'Upload one PDF (manual attribution)',
+    desc: 'Upload a single PDF directly and assign it to one or more student emails. Useful when Drive sharing is fiddly or the cover page format defeats author extraction. Auto-enrols emails that aren\'t on the course yet. Re-uploading the same PDF is idempotent (overwrites the same tracking doc, keyed by SHA-256 of contents).',
+    method: 'POST', url: '/upload_pdf_submission', encoding: 'multipart',
+    fields: [
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
+      {name: 'student_ids', label: 'Student emails (comma- or whitespace-separated)', type: 'textarea', required: true,
+       hint: 'e.g. alice@iisc.ac.in, bob@iisc.ac.in, carol@iisc.ac.in'},
+      {name: 'file', label: 'PDF file', type: 'file', accept: 'application/pdf', required: true},
+    ],
+  },
+  {
     id: 'pdf_ingest',
     section: 'PDF submissions',
     label: 'Ingest PDF submissions from Drive',

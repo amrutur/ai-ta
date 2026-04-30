@@ -274,6 +274,20 @@ class DebugDriveAccessResponse(BaseModel):
     hint: str | None = None
 
 
+class UploadPdfSubmissionResponse(BaseModel):
+    """Returned by POST /upload_pdf_submission.
+
+    Mirrors the per-file shape of IngestedPdfRecord but without the
+    ``placeholder_student_ids`` field — the manual-upload path doesn't
+    create placeholders since the instructor specifies emails directly.
+    """
+    drive_file_id: str
+    filename: str
+    gcs_uri: str
+    student_ids: List[str]
+    auto_added_students: List[str]
+
+
 class IngestPdfSubmissionsRequest(BaseModel):
     institution_id: str
     term_id: str

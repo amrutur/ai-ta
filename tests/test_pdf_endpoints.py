@@ -155,6 +155,176 @@ class TestUploadRubricFile:
             courses.pop(ch, None)
 
 
+class TestUploadPdfSubmission:
+    def _form(self, **extra):
+        d = {"institution_id": "iisc", "term_id": "2025-26",
+             "course_id": "cp260", "notebook_id": "lab1",
+             "student_ids": "alice@iisc.ac.in, bob@iisc.ac.in"}
+        d.update(extra)
+        return d
+
+    def _pdf(self, content=b"%PDF-fake-content"):
+        return ("submission.pdf", content, "application/pdf")
+
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/upload_pdf_submission",
+            data=self._form(),
+            files={"file": self._pdf()},
+        )
+        assert resp.status_code == 401
+
+    def test_no_rubric_404(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}  # no rubric
+        try:
+            resp = client.post(
+                "/upload_pdf_submission",
+                data=self._form(),
+                files={"file": self._pdf()},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 404
+        finally:
+            courses.pop(ch, None)
+
+    def test_wrong_rubric_type_400(self, client):
+        ch = _setup_notebook_course(course_id="cp260", nb_id="lab1")
+        try:
+            resp = client.post(
+                "/upload_pdf_submission",
+                data=self._form(),
+                files={"file": self._pdf()},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+            assert "PDF" in resp.text
+        finally:
+            _teardown(ch)
+
+    def test_non_pdf_content_type_400(self, client):
+        ch = _setup_pdf_course()
+        try:
+            resp = client.post(
+                "/upload_pdf_submission",
+                data=self._form(),
+                files={"file": ("notpdf.txt", b"hello", "text/plain")},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+        finally:
+            _teardown(ch)
+
+    def test_empty_file_400(self, client):
+        ch = _setup_pdf_course()
+        try:
+            resp = client.post(
+                "/upload_pdf_submission",
+                data=self._form(),
+                files={"file": self._pdf(content=b"")},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+        finally:
+            _teardown(ch)
+
+    def test_invalid_email_400(self, client):
+        ch = _setup_pdf_course()
+        try:
+            resp = client.post(
+                "/upload_pdf_submission",
+                data=self._form(student_ids="alice, not-an-email"),
+                files={"file": self._pdf()},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+        finally:
+            _teardown(ch)
+
+    def test_happy_path_creates_tracking_and_mirrors(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.upload_blob", return_value="gs://b/path/manual-X.pdf") as mock_upload, \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={"alice@iisc.ac.in": "Alice"}), \
+                 patch("api_server.upsert_student", new_callable=AsyncMock) as mock_upsert_stu, \
+                 patch("api_server.upsert_pdf_submission", new_callable=AsyncMock) as mock_upsert_pdf:
+                resp = client.post(
+                    "/upload_pdf_submission",
+                    data=self._form(),
+                    files={"file": self._pdf()},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["student_ids"] == ["alice@iisc.ac.in", "bob@iisc.ac.in"]
+            # bob auto-enrolled (not in roster); alice already there
+            assert data["auto_added_students"] == ["bob@iisc.ac.in"]
+            assert data["drive_file_id"].startswith("manual-")
+            assert data["filename"] == "submission.pdf"
+            mock_upload.assert_called_once()
+            mock_upsert_stu.assert_awaited_once()  # only bob
+            mock_upsert_pdf.assert_awaited_once()
+            # Tracking-doc payload: extracted_authors=[] because we didn't
+            # run extraction on this manual upload.
+            kw = mock_upsert_pdf.call_args.kwargs
+            assert kw["extracted_authors"] == []
+            assert kw["student_ids"] == ["alice@iisc.ac.in", "bob@iisc.ac.in"]
+        finally:
+            _teardown(ch)
+
+    def test_idempotent_same_pdf_same_drive_file_id(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.upload_blob", return_value="gs://b/p.pdf"), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={}), \
+                 patch("api_server.upsert_student", new_callable=AsyncMock), \
+                 patch("api_server.upsert_pdf_submission", new_callable=AsyncMock):
+                content = b"%PDF-1.4 idempotent test content"
+                r1 = client.post(
+                    "/upload_pdf_submission",
+                    data=self._form(),
+                    files={"file": ("a.pdf", content, "application/pdf")},
+                    headers=_instructor_header(),
+                )
+                r2 = client.post(
+                    "/upload_pdf_submission",
+                    data=self._form(),
+                    files={"file": ("a.pdf", content, "application/pdf")},
+                    headers=_instructor_header(),
+                )
+            assert r1.status_code == 200 and r2.status_code == 200
+            # Same content → same SHA → same drive_file_id, so the second
+            # upload overwrites the same tracking doc rather than creating
+            # a duplicate.
+            assert r1.json()["drive_file_id"] == r2.json()["drive_file_id"]
+        finally:
+            _teardown(ch)
+
+    def test_dedupes_email_list(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.upload_blob", return_value="gs://b/p.pdf"), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={"alice@iisc.ac.in": "Alice"}), \
+                 patch("api_server.upsert_student", new_callable=AsyncMock), \
+                 patch("api_server.upsert_pdf_submission", new_callable=AsyncMock):
+                resp = client.post(
+                    "/upload_pdf_submission",
+                    # email mentioned twice with different cases → one entry
+                    data=self._form(student_ids="alice@iisc.ac.in, ALICE@IISC.AC.IN"),
+                    files={"file": self._pdf()},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            assert resp.json()["student_ids"] == ["alice@iisc.ac.in"]
+        finally:
+            _teardown(ch)
+
+
 class TestDebugPdfAuthors:
     def test_requires_auth(self, client):
         resp = client.post(
