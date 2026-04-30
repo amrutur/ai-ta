@@ -45,13 +45,17 @@ firestore/
 │       │
 │       ├── Notebooks/ (subcollection — rubrics & instructor content)
 │       │   └── {notebook_id}/
-│       │       ├── assignment_type ("notebook" | "pdf", default "notebook")
+│       │       ├── assignment_type ("q&a" | "report") — rubric shape
+│       │       ├── submission_type ("colab" | "pdf") — submission format
+│       │       │     (legacy assignment_type values "notebook" / "pdf" are
+│       │       │      auto-mapped on read: "notebook"→q&a+colab, "pdf"→report+pdf)
 │       │       ├── max_marks, isactive_eval
-│       │       ├── (notebook mode) context, questions, answers, outputs
-│       │       ├── (pdf mode) problem_statement, rubric_text, sample_graded_response
+│       │       ├── (q&a) context, questions, answers, outputs
+│       │       ├── (report) problem_statement, rubric_text, sample_graded_response,
+│       │       │            rubric_pdf_uri (gs:// path, optional)
 │       │       ├── rag_chunks/ (subcollection — vector embeddings)
 │       │       │   └── {auto-id}/ (source_file, chunk_index, text, embedding)
-│       │       └── pdf_submissions/ (subcollection — per-PDF tracking, pdf mode only)
+│       │       └── pdf_submissions/ (subcollection — per-PDF tracking, when submission_type=pdf)
 │       │           └── {drive_file_id}/
 │       │               ├── drive_modified_time, gcs_uri, original_filename
 │       │               ├── extracted_authors, student_ids, ingested_at
@@ -348,6 +352,13 @@ h) you can delete this preamble for the student.
 ### PDF Assignment Mode
 
 For courses where students submit PDF reports (e.g. lab write-ups, project reports) instead of working in Colab notebooks, the platform supports a PDF-assignment grading flow that reuses the same course/student/grade data model.
+
+> **Rubric type model.** Each rubric carries two orthogonal flags:
+>
+> - `assignment_type`: `"q&a"` (per-question scoring with component-decomposed rubric answers) or `"report"` (holistic scoring of a report/lab against a single rubric body).
+> - `submission_type`: `"colab"` (notebook cells parsed for per-question answers) or `"pdf"` (a single PDF report passed to the agent as a multimodal Part).
+>
+> The supported combinations today: `q&a + colab` (the original notebook flow) and `report + pdf` (this section). The `q&a + pdf` combination is captured in [docs/future_features.md](./docs/future_features.md). Legacy `assignment_type` values `"notebook"` and `"pdf"` are still accepted on writes and auto-mapped to the new pair on reads.
 
 **1. Upload a PDF rubric** — `POST /upload_rubric` with `assignment_type: "pdf"`. The PDF rubric is holistic (one rubric per entire report), not per-question:
 

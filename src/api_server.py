@@ -205,9 +205,14 @@ async def load_courses_cache():
                         'student_assist_prompt', 'scoring_assist_prompt'):
                 courses[course_handle].setdefault(key, default_values.get(key))
 
-            # Load rubric notebooks for this course into the cache
+            # Load rubric notebooks for this course into the cache, normalizing
+            # legacy assignment_type values into the (assignment_type,
+            # submission_type) pair on the way in.
             notebooks = await load_notebooks_from_db(config.db, course_handle)
             for notebook_id, notebook_data in notebooks.items():
+                a_type, s_type = _normalize_rubric_types(notebook_data)
+                notebook_data['assignment_type'] = a_type
+                notebook_data['submission_type'] = s_type
                 courses[course_handle][notebook_id] = notebook_data
             if notebooks:
                 logging.info(f"  Course '{course_handle}': loaded {len(notebooks)} rubric notebook(s)")
@@ -1299,6 +1304,57 @@ def is_authorized(user_gmail: str, course_handle: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Rubric type discriminator
+#
+# Rubrics carry two orthogonal flags:
+#   - assignment_type: "q&a"  | "report"  (per-question vs holistic rubric)
+#   - submission_type: "colab" | "pdf"     (notebook cells vs PDF file)
+#
+# Older rubrics carry only the legacy single field assignment_type with
+# values "notebook" or "pdf". _normalize_rubric_types maps both old and new
+# representations to a canonical (assignment_type, submission_type) tuple.
+# ---------------------------------------------------------------------------
+
+VALID_ASSIGNMENT_TYPES = {"q&a", "report"}
+VALID_SUBMISSION_TYPES = {"colab", "pdf"}
+
+
+def _normalize_rubric_types(rubric: dict) -> tuple[str, str]:
+    """Return ``(assignment_type, submission_type)`` for a rubric doc.
+
+    Accepts both the new two-field schema and legacy rubrics that only
+    have ``assignment_type`` set to the old values:
+      - ``"notebook"``  → ``("q&a",   "colab")``
+      - ``"pdf"``       → ``("report", "pdf")``
+      - missing entirely → ``("q&a",   "colab")`` (legacy default)
+    """
+    a = rubric.get('assignment_type')
+    s = rubric.get('submission_type')
+
+    # Both new fields present and valid.
+    if a in VALID_ASSIGNMENT_TYPES and s in VALID_SUBMISSION_TYPES:
+        return a, s
+
+    # Legacy values.
+    if a == 'pdf':
+        return 'report', 'pdf'
+    # Legacy "notebook" or missing → q&a + colab.
+    return 'q&a', 'colab'
+
+
+def _is_pdf_rubric(rubric: dict) -> bool:
+    """True iff this rubric expects PDF submissions (any assignment shape)."""
+    _, submission_type = _normalize_rubric_types(rubric)
+    return submission_type == 'pdf'
+
+
+def _is_report_pdf_rubric(rubric: dict) -> bool:
+    """True iff this is the report+pdf combo (the only PDF combo we grade today)."""
+    a, s = _normalize_rubric_types(rubric)
+    return a == 'report' and s == 'pdf'
+
+
 def _course_role(user_email: str, course_data: dict) -> str | None:
     """Return 'admin', 'instructor', 'ta', or None for the user's role on a course."""
     if not user_email:
@@ -1850,14 +1906,29 @@ async def upload_rubric_api(
         if not is_authorized(user_gmail, course_handle) :
             raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin. Is not allowed to upload rubric")
 
-        if query_body.assignment_type == "pdf":
+        # Accept legacy assignment_type values: "pdf" → "report" (with PDF
+        # submission), "notebook" → "q&a" (with Colab submission). Clients
+        # using the new two-field schema can set both fields explicitly.
+        a_type = query_body.assignment_type
+        s_type = query_body.submission_type
+        if a_type == "pdf" and s_type is None:
+            a_type, s_type = "report", "pdf"
+        elif a_type == "notebook" and s_type is None:
+            a_type, s_type = "q&a", "colab"
+        if a_type not in VALID_ASSIGNMENT_TYPES:
+            a_type = "q&a"
+        if s_type is None or s_type not in VALID_SUBMISSION_TYPES:
+            s_type = "colab"
+
+        if s_type == "pdf":
             if not query_body.problem_statement or not query_body.rubric_text:
                 raise HTTPException(
                     status_code=400,
                     detail="PDF rubric requires both 'problem_statement' and 'rubric_text'."
                 )
             courses[course_handle][query_body.notebook_id] = {
-                'assignment_type': 'pdf',
+                'assignment_type': a_type,
+                'submission_type': s_type,
                 'max_marks': query_body.max_marks,
                 'problem_statement': query_body.problem_statement,
                 'rubric_text': query_body.rubric_text,
@@ -1868,14 +1939,17 @@ async def upload_rubric_api(
                 config.db, course_handle, query_body.notebook_id,
                 query_body.max_marks, query_body.problem_statement,
                 query_body.rubric_text, query_body.sample_graded_response,
+                assignment_type=a_type,
             )
         else:
             if query_body.context is None or query_body.questions is None or query_body.answers is None or query_body.outputs is None:
                 raise HTTPException(
                     status_code=400,
-                    detail="Notebook rubric requires 'context', 'questions', 'answers', and 'outputs'."
+                    detail="Colab (q&a) rubric requires 'context', 'questions', 'answers', and 'outputs'."
                 )
             courses[course_handle][query_body.notebook_id] = {
+                'assignment_type': a_type,
+                'submission_type': s_type,
                 'context': query_body.context,
                 'questions': query_body.questions,
                 'max_marks': query_body.max_marks,
@@ -1887,6 +1961,7 @@ async def upload_rubric_api(
                 config.db, course_handle, query_body.notebook_id,
                 query_body.max_marks, query_body.context, query_body.questions,
                 query_body.answers, query_body.outputs,
+                assignment_type=a_type,
             )
             await update_notebook_info(config.db, course_handle, query_body.notebook_id, 'isactive_eval', True)
 
@@ -2152,11 +2227,14 @@ async def upload_rubric_file(
     if not is_authorized(user_gmail, course_handle):
         raise HTTPException(status_code=403, detail="Only instructors/TAs can upload rubrics for this course.")
 
-    if assignment_type != "pdf":
+    # Accept both legacy ("pdf") and new ("report") values; this endpoint
+    # only supports report+pdf — the other combos go through /upload_rubric
+    # (q&a+colab via the Colab client) or future_features.md (q&a+pdf).
+    if assignment_type not in ("pdf", "report"):
         raise HTTPException(
             status_code=400,
-            detail="File upload currently supports assignment_type='pdf'. "
-                   "For notebook rubrics, use /upload_rubric_link with a Drive share link.",
+            detail="File upload currently supports assignment_type='report' (legacy alias 'pdf'). "
+                   "For Colab/q&a rubrics, use the Colab client's ta.upload_rubric().",
         )
 
     if (file.content_type or '') not in ('application/pdf', 'application/x-pdf'):
@@ -2184,7 +2262,8 @@ async def upload_rubric_file(
 
     # Update the in-memory cache so subsequent grading calls see the new rubric.
     courses[course_handle][notebook_id] = {
-        'assignment_type': 'pdf',
+        'assignment_type': 'report',
+        'submission_type': 'pdf',
         'max_marks': max_marks,
         'problem_statement': '',
         'rubric_text': '',
@@ -2194,7 +2273,7 @@ async def upload_rubric_file(
     }
 
     logging.info(
-        f"Instructor {user_gmail} uploaded PDF rubric for {course_handle}/{notebook_id} → {rubric_pdf_uri}"
+        f"Instructor {user_gmail} uploaded report+pdf rubric for {course_handle}/{notebook_id} → {rubric_pdf_uri}"
     )
     return AddRubricResponse(
         response=f"Rubric '{notebook_id}' uploaded for course '{course_handle}' (rubric_pdf_uri={rubric_pdf_uri}).",
@@ -2235,18 +2314,18 @@ async def upload_rubric_link(request: Request):
     if not is_authorized(user_gmail, course_handle):
         raise HTTPException(status_code=403, detail="Only instructors/TAs can upload rubrics for this course.")
 
-    if assignment_type == "notebook":
+    if assignment_type in ("notebook", "q&a"):
         raise HTTPException(
             status_code=501,
             detail=(
-                "Notebook rubric upload via link is not yet implemented server-side. "
+                "Q&A (Colab) rubric upload via link is not yet implemented server-side. "
                 "Please use the Colab client's ta.upload_rubric() function — it parses "
                 "the rubric notebook cells locally and posts the structured data to "
                 "/upload_rubric."
             ),
         )
 
-    if assignment_type != "pdf":
+    if assignment_type not in ("pdf", "report"):
         raise HTTPException(status_code=400, detail=f"Unsupported assignment_type: {assignment_type!r}")
 
     file_id = get_file_id_from_share_link(body["drive_share_link"])
@@ -2281,7 +2360,8 @@ async def upload_rubric_link(request: Request):
         rubric_pdf_uri=rubric_pdf_uri,
     )
     courses[course_handle][notebook_id] = {
-        'assignment_type': 'pdf',
+        'assignment_type': 'report',
+        'submission_type': 'pdf',
         'max_marks': max_marks,
         'problem_statement': '',
         'rubric_text': '',
@@ -2291,7 +2371,7 @@ async def upload_rubric_link(request: Request):
     }
 
     logging.info(
-        f"Instructor {user_gmail} uploaded PDF rubric via Drive link for "
+        f"Instructor {user_gmail} uploaded report+pdf rubric via Drive link for "
         f"{course_handle}/{notebook_id} → {rubric_pdf_uri}"
     )
     return AddRubricResponse(
@@ -2379,8 +2459,8 @@ async def ingest_pdf_submissions(query_body: IngestPdfSubmissionsRequest, reques
     rubric = courses[course_handle].get(query_body.notebook_id)
     if not rubric:
         raise HTTPException(status_code=404, detail=f"Notebook '{query_body.notebook_id}' has no rubric — upload a PDF rubric first.")
-    if rubric.get('assignment_type') != 'pdf':
-        raise HTTPException(status_code=400, detail=f"Notebook '{query_body.notebook_id}' is not configured for PDF assignments.")
+    if not _is_pdf_rubric(rubric):
+        raise HTTPException(status_code=400, detail=f"Notebook '{query_body.notebook_id}' is not configured for PDF submissions.")
 
     folder_id = extract_folder_id_from_link(query_body.drive_folder_url)
     if not folder_id:
@@ -2499,8 +2579,8 @@ async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: R
     rubric = courses[course_handle].get(query_body.notebook_id)
     if not rubric:
         raise HTTPException(status_code=404, detail=f"Notebook '{query_body.notebook_id}' has no rubric.")
-    if rubric.get('assignment_type') != 'pdf':
-        raise HTTPException(status_code=400, detail=f"Notebook '{query_body.notebook_id}' is not a PDF assignment.")
+    if not _is_report_pdf_rubric(rubric):
+        raise HTTPException(status_code=400, detail=f"Notebook '{query_body.notebook_id}' is not a report+pdf assignment.")
 
     problem_statement = rubric.get('problem_statement', '')
     rubric_text = rubric.get('rubric_text', '')
@@ -2601,11 +2681,18 @@ async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: R
 
 @app.post("/grade_assignment")
 async def grade_assignment(query_body: GradeAssignmentRequest, request: Request):
-    """Unified grade endpoint — dispatches to PDF or Colab path by assignment_type.
+    """Unified grade endpoint — dispatches by (assignment_type, submission_type).
 
-    Looks up the rubric for ``notebook_id`` in the course cache and routes
-    to /grade_pdf_assignment (multimodal scoring of every ingested PDF) or
-    /grade_notebook (per-question scoring for one or all enrolled students).
+    Looks up the rubric for ``notebook_id`` in the course cache and routes:
+
+      ============== ============== ==================================
+       assignment    submission     Path
+      ============== ============== ==================================
+       q&a            colab          /grade_notebook (per-question)
+       report         pdf            /grade_pdf_assignment (multimodal)
+       q&a            pdf            501 — see docs/future_features.md
+       report         colab          400 — uncommon, not implemented
+      ============== ============== ==================================
 
     The unified body always includes ``student_id`` (defaults to "All");
     PDF mode ignores it because each PDF already has its student_ids
@@ -2624,9 +2711,9 @@ async def grade_assignment(query_body: GradeAssignmentRequest, request: Request)
     if not rubric:
         raise HTTPException(status_code=404, detail=f"No rubric for assignment '{query_body.notebook_id}'.")
 
-    # Default to notebook mode for legacy rubrics that predate assignment_type.
-    assignment_type = rubric.get('assignment_type', 'notebook')
-    if assignment_type == 'pdf':
+    a_type, s_type = _normalize_rubric_types(rubric)
+
+    if a_type == "report" and s_type == "pdf":
         pdf_req = GradePdfAssignmentRequest(
             institution_id=query_body.institution_id,
             term_id=query_body.term_id,
@@ -2635,7 +2722,8 @@ async def grade_assignment(query_body: GradeAssignmentRequest, request: Request)
             do_regrade=query_body.do_regrade,
         )
         return await grade_pdf_assignment(pdf_req, request)
-    else:
+
+    if a_type == "q&a" and s_type == "colab":
         nb_req = GradeNotebookRequest(
             student_id=query_body.student_id or "All",
             notebook_id=query_body.notebook_id,
@@ -2645,6 +2733,18 @@ async def grade_assignment(query_body: GradeAssignmentRequest, request: Request)
             do_regrade=query_body.do_regrade,
         )
         return await grade_notebook(nb_req, request)
+
+    if a_type == "q&a" and s_type == "pdf":
+        raise HTTPException(
+            status_code=501,
+            detail=("Q&A grading over PDF submissions is not yet implemented. "
+                    "See docs/future_features.md for the implementation plan."),
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unsupported rubric combination: assignment_type={a_type!r}, submission_type={s_type!r}.",
+    )
 
 
 @app.post("/regrade_pdf_submission", response_model=RegradePdfSubmissionResponse)
@@ -2666,8 +2766,8 @@ async def regrade_pdf_submission(query_body: RegradePdfSubmissionRequest, reques
         raise HTTPException(status_code=403, detail="Only instructors can regrade PDF submissions.")
 
     rubric = courses[course_handle].get(query_body.notebook_id)
-    if not rubric or rubric.get('assignment_type') != 'pdf':
-        raise HTTPException(status_code=404, detail=f"Notebook '{query_body.notebook_id}' is not a PDF assignment.")
+    if not rubric or not _is_report_pdf_rubric(rubric):
+        raise HTTPException(status_code=404, detail=f"Notebook '{query_body.notebook_id}' is not a report+pdf assignment.")
 
     # Pull the student's mirror doc to discover drive_file_id + co-authors.
     mirror = await get_student_pdf_mirror(

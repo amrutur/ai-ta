@@ -108,8 +108,9 @@ class TestUploadRubricFile:
             # destination_path should put the rubric under <course>/rubrics/<notebook>.pdf
             assert args[1] == f"{ch}/rubrics/lab1.pdf"
             mock_save.assert_awaited_once()
-            # The cache reflects the new rubric
-            assert courses[ch]["lab1"]["assignment_type"] == "pdf"
+            # The cache reflects the new rubric in the 2D schema.
+            assert courses[ch]["lab1"]["assignment_type"] == "report"
+            assert courses[ch]["lab1"]["submission_type"] == "pdf"
             assert courses[ch]["lab1"]["rubric_pdf_uri"] == "gs://b/path/lab1.pdf"
         finally:
             courses.pop(ch, None)
@@ -148,7 +149,8 @@ class TestUploadRubricFile:
                 headers=_instructor_header(),
             )
             assert resp.status_code == 400
-            assert "upload_rubric_link" in resp.text or "Drive" in resp.text
+            # Error message should point Colab/q&a users at the right path.
+            assert "Colab" in resp.text or "q&a" in resp.text or "ta.upload_rubric" in resp.text
         finally:
             courses.pop(ch, None)
 
@@ -407,7 +409,9 @@ class TestUploadPdfRubric:
                     headers=_instructor_header(),
                 )
             assert resp.status_code == 200
-            assert courses[ch]["lab1"]["assignment_type"] == "pdf"
+            # Legacy "pdf" value gets mapped to (report, pdf) on write.
+            assert courses[ch]["lab1"]["assignment_type"] == "report"
+            assert courses[ch]["lab1"]["submission_type"] == "pdf"
             assert courses[ch]["lab1"]["problem_statement"] == "Build a TCP server"
         finally:
             _teardown(ch)
@@ -799,6 +803,57 @@ class TestGradeAssignmentDispatch:
                 )
             mock_pdf.assert_not_awaited()
             mock_nb.assert_awaited_once()
+        finally:
+            courses.pop(ch, None)
+
+    def test_qa_pdf_returns_501_pointer_to_future_features(self, client):
+        # New 2D combo: q&a rubric over PDF submission. Not implemented yet.
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {
+            "instructor_gmail": "instructor@test.com",
+            "lab1": {
+                "assignment_type": "q&a",
+                "submission_type": "pdf",
+                "max_marks": 50.0,
+            },
+        }
+        try:
+            resp = client.post(
+                "/grade_assignment",
+                json={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                      "notebook_id": "lab1"},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 501
+            assert "future_features" in resp.text or "not yet implemented" in resp.text
+        finally:
+            courses.pop(ch, None)
+
+    def test_explicit_2d_report_pdf_dispatches_to_pdf_path(self, client):
+        # New schema: explicit assignment_type+submission_type pair.
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {
+            "instructor_gmail": "instructor@test.com",
+            "lab1": {
+                "assignment_type": "report",
+                "submission_type": "pdf",
+                "max_marks": 50.0,
+            },
+        }
+        try:
+            with patch("api_server.grade_pdf_assignment", new_callable=AsyncMock) as mock_pdf:
+                mock_pdf.return_value = MagicMock()
+                client.post(
+                    "/grade_assignment",
+                    json={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                          "notebook_id": "lab1"},
+                    headers=_instructor_header(),
+                )
+            mock_pdf.assert_awaited_once()
         finally:
             courses.pop(ch, None)
 

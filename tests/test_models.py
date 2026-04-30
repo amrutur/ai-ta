@@ -164,8 +164,22 @@ class TestAddRubricRequest:
             course_id="6.001",
         )
         assert req.max_marks == 100.0
-        # Default assignment_type stays "notebook" so existing clients are unaffected.
-        assert req.assignment_type == "notebook"
+        # Default assignment_type is "q&a" (per-question rubric, the most
+        # common case). Submission_type defaults to None — the endpoint
+        # infers "colab" from assignment_type when unset.
+        assert req.assignment_type == "q&a"
+        assert req.submission_type is None
+
+    def test_legacy_assignment_type_values_accepted(self):
+        # Old clients still send 'notebook' / 'pdf'; the model accepts the
+        # raw string, the endpoint maps it to the new pair on write.
+        req = AddRubricRequest(
+            notebook_id="hw1", max_marks=100.0,
+            institution_id="mit", term_id="2025", course_id="6.001",
+            assignment_type="pdf",
+            problem_statement="x", rubric_text="y",
+        )
+        assert req.assignment_type == "pdf"
 
     def test_has_outputs(self):
         """outputs field must exist (was missing in an earlier version)."""

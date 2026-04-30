@@ -287,3 +287,51 @@ class TestDashboardServiceRegistry:
         resp = client.get("/", headers=_auth_header("admin@test.com"))
         assert "/upload_student_roster" in resp.text
         assert "Course roster" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Rubric type normalization (assignment_type × submission_type)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeRubricTypes:
+    def test_legacy_pdf_value(self):
+        from api_server import _normalize_rubric_types
+        assert _normalize_rubric_types({"assignment_type": "pdf"}) == ("report", "pdf")
+
+    def test_legacy_notebook_value(self):
+        from api_server import _normalize_rubric_types
+        assert _normalize_rubric_types({"assignment_type": "notebook"}) == ("q&a", "colab")
+
+    def test_missing_defaults_to_qa_colab(self):
+        from api_server import _normalize_rubric_types
+        # Pre-discriminator rubrics had no assignment_type at all; treat as
+        # q&a + colab since that was the original (and only) flow.
+        assert _normalize_rubric_types({"max_marks": 100.0}) == ("q&a", "colab")
+
+    def test_new_2d_pair_passthrough(self):
+        from api_server import _normalize_rubric_types
+        assert _normalize_rubric_types({
+            "assignment_type": "q&a", "submission_type": "pdf",
+        }) == ("q&a", "pdf")
+        assert _normalize_rubric_types({
+            "assignment_type": "report", "submission_type": "pdf",
+        }) == ("report", "pdf")
+
+    def test_invalid_combo_falls_back_to_safe_default(self):
+        from api_server import _normalize_rubric_types
+        # Garbage values should not crash — fall back to q&a+colab.
+        assert _normalize_rubric_types({
+            "assignment_type": "weird", "submission_type": "alien",
+        }) == ("q&a", "colab")
+
+    def test_helpers_use_normalized_form(self):
+        from api_server import _is_pdf_rubric, _is_report_pdf_rubric
+        # Legacy "pdf" rubric → report+pdf.
+        assert _is_pdf_rubric({"assignment_type": "pdf"})
+        assert _is_report_pdf_rubric({"assignment_type": "pdf"})
+        # New q&a+pdf rubric → pdf submission, but NOT a report+pdf.
+        assert _is_pdf_rubric({"assignment_type": "q&a", "submission_type": "pdf"})
+        assert not _is_report_pdf_rubric({"assignment_type": "q&a", "submission_type": "pdf"})
+        # q&a+colab → neither.
+        assert not _is_pdf_rubric({"assignment_type": "q&a", "submission_type": "colab"})

@@ -76,7 +76,9 @@ class TestSavePdfRubric:
 
         leaf.set.assert_awaited_once()
         payload = leaf.set.call_args.args[0]
-        assert payload['assignment_type'] == 'pdf'
+        # New 2D schema: (assignment_type='report', submission_type='pdf').
+        assert payload['assignment_type'] == 'report'
+        assert payload['submission_type'] == 'pdf'
         assert payload['max_marks'] == 50.0
         assert payload['problem_statement'] == "Build a TCP server"
         assert payload['rubric_text'] == "Correctness 30, code quality 20"

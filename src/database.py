@@ -109,15 +109,20 @@ async def load_notebooks_from_db(db, course_handle: str) -> dict:
         logging.error(f"Failed to load notebooks for course '{course_handle}': {e}")
     return notebooks
 
-async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict, outputs:dict):
-    ''' Save the notebook's rubric information to the Firestore database under Notebooks
-        subcollection for this course.
+async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict, outputs:dict, assignment_type: str = "q&a"):
+    ''' Save the q&a / Colab rubric to courses/{ch}/Notebooks/{nb}.
 
-        Holds the context, questions, and answers for the rubric notebook, which will be used by the grading agent when grading student submissions. Also saves the max_marks for the notebook, which is used to calculate the final grade percentage for the submission.
+        Holds the context, questions, and answers parsed from the rubric
+        notebook, used by the scoring agent when grading per-question
+        submissions. Tags the rubric with assignment_type=<arg> (default
+        "q&a") and submission_type="colab" so the dispatcher in
+        /grade_assignment routes to the right scorer.
     '''
     try:
         rubric_ref = db.collection(u'courses').document(course_handle).collection(u'Notebooks').document(notebook_id)
         await rubric_ref.set({
+            u'assignment_type': assignment_type,
+            u'submission_type': 'colab',
             u'max_marks': max_marks,
             u'context': context,
             u'questions': questions,
@@ -691,8 +696,9 @@ async def save_pdf_rubric(
     rubric_text: str = "",
     sample_graded_response: str | None = None,
     rubric_pdf_uri: str | None = None,
+    assignment_type: str = "report",
 ):
-    """Save a PDF-assignment rubric under courses/{ch}/Notebooks/{nb}.
+    """Save a PDF-submission rubric under courses/{ch}/Notebooks/{nb}.
 
     Either the text fields (problem_statement + rubric_text) or
     ``rubric_pdf_uri`` (a ``gs://`` path to a rubric PDF on GCS) must be
@@ -701,14 +707,16 @@ async def save_pdf_rubric(
     figures, tables, and worked examples in the rubric are visible to the
     model. The text fields remain useful as a fallback or supplement.
 
-    Sets ``assignment_type='pdf'`` so the cache + endpoints can branch on it.
-    Always enables eval — instructor toggles it off via /disable_eval if needed.
+    Sets ``submission_type='pdf'`` and ``assignment_type=<arg>`` (default
+    "report"). Always enables eval — instructor toggles it off via
+    /disable_eval if needed.
     """
     try:
         rubric_ref = (db.collection('courses').document(course_handle)
                       .collection('Notebooks').document(notebook_id))
         payload = {
-            'assignment_type': 'pdf',
+            'assignment_type': assignment_type,
+            'submission_type': 'pdf',
             'max_marks': max_marks,
             'problem_statement': problem_statement or '',
             'rubric_text': rubric_text or '',

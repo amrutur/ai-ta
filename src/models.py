@@ -145,21 +145,36 @@ class ListResponse(BaseModel):
     listname: list[str]
 
 class AddRubricRequest(BaseModel):
+    """Add or replace a rubric for an assignment.
+
+    The rubric carries two orthogonal flags:
+
+    - ``assignment_type``: ``"q&a"`` (per-question scoring) or ``"report"``
+      (holistic scoring). For backward compatibility the legacy values
+      ``"notebook"`` and ``"pdf"`` are also accepted and mapped:
+      ``"notebook"`` → ``"q&a"`` + ``submission_type="colab"``; ``"pdf"`` →
+      ``"report"`` + ``submission_type="pdf"``.
+    - ``submission_type``: ``"colab"`` or ``"pdf"`` — the format students
+      submit in. Defaults are inferred from the assignment_type when
+      omitted (q&a→colab, report→pdf).
+    """
     notebook_id: str
     max_marks: float
     institution_id: str
     term_id: str
     course_id: str
-    # Notebook-mode rubric (default). Optional so PDF-mode requests can omit them.
+    # q&a / Colab rubric body (optional so report rubrics can omit them).
     context: Dict[str, Any] | None = None
     questions: Dict[str, Any] | None = None
     answers: Dict[str, Any] | None = None
     outputs: Dict[str, Any] | None = None
-    # PDF-mode rubric. Required when assignment_type == "pdf".
-    assignment_type: str = "notebook"  # "notebook" | "pdf"
+    # report / PDF rubric body (optional so q&a rubrics can omit them).
     problem_statement: str | None = None
     rubric_text: str | None = None
     sample_graded_response: str | None = None
+    # Discriminators. Default keeps existing clients working: notebook → q&a+colab.
+    assignment_type: str = "q&a"
+    submission_type: str | None = None
 
 class AddRubricResponse(BaseModel):
     response: str
