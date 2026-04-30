@@ -214,3 +214,54 @@ class TestRouting:
         resp = client.get("/login?next=/", follow_redirects=False)
         assert resp.status_code == 200
         assert "Redirecting to Google" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Dashboard service registry — smoke test that the major endpoints are wired up
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardServiceRegistry:
+    """Sanity-check that the dashboard HTML offers buttons for the
+    instructor-facing endpoints. The dashboard is a single-page app, so the
+    JS service registry sits inside the HTML; we just check for the URLs."""
+
+    def test_includes_pdf_endpoints(self, client):
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        assert resp.status_code == 200
+        for url in [
+            "/upload_rubric_file",
+            "/upload_rubric_link",
+            "/ingest_pdf_submissions",
+            "/grade_pdf_assignment",
+            "/regrade_pdf_submission",
+        ]:
+            assert url in resp.text, f"Dashboard should expose {url}"
+
+    def test_includes_grade_management_endpoints(self, client):
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        for url in [
+            "/fetch_marks_list",
+            "/fetch_grader_response",
+            "/notify_student_grades",
+            "/grade_notebook",
+            "/regrade_answer",
+        ]:
+            assert url in resp.text
+
+    def test_includes_course_config_endpoints(self, client):
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        for url in [
+            "/enable_tutor",
+            "/disable_tutor",
+            "/update_course_config",
+            "/rate_limit_status",
+            "/build_course_index",
+            "/list_course_files",
+        ]:
+            assert url in resp.text
+
+    def test_calls_my_courses_for_picker(self, client):
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        assert "/my_courses" in resp.text
+        assert "course-select" in resp.text
