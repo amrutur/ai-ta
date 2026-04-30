@@ -196,16 +196,21 @@ async def score_pdf_submission(
     course_material: str = "",
     student_contention: str = "",
     previous_grading: str = "",
+    rubric_pdf_uri: str | None = None,
 ) -> tuple[float, str]:
     """Score a holistic PDF report using the scoring agent.
 
-    The PDF is referenced by its GCS URI (Vertex AI accepts ``gs://`` URIs in
-    multimodal Parts), so figures, tables, and plots are visible to the model
-    without us needing to extract text.
+    The student's PDF is referenced by its GCS URI (Vertex AI accepts
+    ``gs://`` URIs in multimodal Parts), so figures, tables, and plots are
+    visible to the model without us needing to extract text. When
+    ``rubric_pdf_uri`` is supplied, the rubric itself is attached as a
+    second multimodal Part so the model also sees rubric figures / tables /
+    worked examples.
 
     Args:
-        problem_statement: The lab/assignment problem statement text.
-        rubric_text: The holistic rubric.
+        problem_statement: Free-text problem statement (may be empty when
+            the rubric PDF already contains it).
+        rubric_text: Free-text rubric (may be empty when rubric_pdf_uri set).
         sample_graded_response: One-shot example of a graded response.
         gcs_uri: ``gs://...`` URI of the student's PDF report.
         runner: ADK Runner wrapping the scoring agent.
@@ -214,6 +219,7 @@ async def score_pdf_submission(
         course_material: Optional RAG context.
         student_contention: Optional contention text from the student (regrade flow).
         previous_grading: Optional prior agent response (regrade flow).
+        rubric_pdf_uri: Optional ``gs://`` URI of a rubric PDF.
 
     Returns:
         Tuple of (marks, response_text). Raises HTTPException(500) if the
@@ -227,12 +233,20 @@ async def score_pdf_submission(
             session_id=session_id,
         )
 
-        # Build the textual prompt around a single PDF Part.
+        # Build the textual prompt around the PDF Parts.
         pieces: list[str] = []
         if course_material:
             pieces.append("{Relevant course material:} " + truncate_text(course_material))
-        pieces.append("{The assignment problem statement is:} " + truncate_text(problem_statement))
-        pieces.append("{The scoring rubric is:} " + truncate_text(rubric_text))
+        if problem_statement:
+            pieces.append("{The assignment problem statement is:} " + truncate_text(problem_statement))
+        if rubric_pdf_uri:
+            pieces.append(
+                "{The scoring rubric (PDF) is attached. It contains the "
+                "problem statement, scoring criteria, and may include a "
+                "sample graded response.}"
+            )
+        if rubric_text:
+            pieces.append("{The scoring rubric (text) is:} " + truncate_text(rubric_text))
         if sample_graded_response:
             pieces.append("{A sample graded response (for reference, not for re-grading):} "
                           + truncate_text(sample_graded_response))
@@ -248,13 +262,11 @@ async def score_pdf_submission(
         )
         full_prompt = truncate_prompt(" ".join(pieces))
 
-        content = types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(text=full_prompt),
-                types.Part.from_uri(file_uri=gcs_uri, mime_type="application/pdf"),
-            ],
-        )
+        parts = [types.Part.from_text(text=full_prompt)]
+        if rubric_pdf_uri:
+            parts.append(types.Part.from_uri(file_uri=rubric_pdf_uri, mime_type="application/pdf"))
+        parts.append(types.Part.from_uri(file_uri=gcs_uri, mime_type="application/pdf"))
+        content = types.Content(role="user", parts=parts)
 
         logging.debug(f"PDF scoring prompt for user {user_id}: {full_prompt[:500]}...")
         response_text = await run_agent_and_get_response(session_id, user_id, content, runner)

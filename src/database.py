@@ -687,11 +687,19 @@ async def save_pdf_rubric(
     course_handle: str,
     notebook_id: str,
     max_marks: float,
-    problem_statement: str,
-    rubric_text: str,
+    problem_statement: str = "",
+    rubric_text: str = "",
     sample_graded_response: str | None = None,
+    rubric_pdf_uri: str | None = None,
 ):
     """Save a PDF-assignment rubric under courses/{ch}/Notebooks/{nb}.
+
+    Either the text fields (problem_statement + rubric_text) or
+    ``rubric_pdf_uri`` (a ``gs://`` path to a rubric PDF on GCS) must be
+    provided. When ``rubric_pdf_uri`` is set the scoring agent receives the
+    rubric PDF as a multimodal Part alongside each student submission, so
+    figures, tables, and worked examples in the rubric are visible to the
+    model. The text fields remain useful as a fallback or supplement.
 
     Sets ``assignment_type='pdf'`` so the cache + endpoints can branch on it.
     Always enables eval — instructor toggles it off via /disable_eval if needed.
@@ -699,15 +707,18 @@ async def save_pdf_rubric(
     try:
         rubric_ref = (db.collection('courses').document(course_handle)
                       .collection('Notebooks').document(notebook_id))
-        await rubric_ref.set({
+        payload = {
             'assignment_type': 'pdf',
             'max_marks': max_marks,
-            'problem_statement': problem_statement,
-            'rubric_text': rubric_text,
+            'problem_statement': problem_statement or '',
+            'rubric_text': rubric_text or '',
             'sample_graded_response': sample_graded_response or '',
             'isactive_eval': True,
             'last_updated': firestore.SERVER_TIMESTAMP,
-        }, merge=True)
+        }
+        if rubric_pdf_uri is not None:
+            payload['rubric_pdf_uri'] = rubric_pdf_uri
+        await rubric_ref.set(payload, merge=True)
     except google_exceptions.PermissionDenied:
         logging.error("Service account permission denied while saving PDF rubric.")
         raise HTTPException(status_code=500, detail="Database access denied.")

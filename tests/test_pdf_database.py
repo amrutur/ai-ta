@@ -91,6 +91,20 @@ class TestSavePdfRubric:
         payload = leaf.set.call_args.args[0]
         assert payload['sample_graded_response'] == ""
 
+    @pytest.mark.asyncio
+    async def test_rubric_pdf_uri_persisted(self):
+        db, leaf, _ = _make_db_with_doc()
+        await save_pdf_rubric(
+            db, "ch", "nb", 50.0,
+            rubric_pdf_uri="gs://bucket/ch/rubrics/nb.pdf",
+        )
+        payload = leaf.set.call_args.args[0]
+        assert payload['rubric_pdf_uri'] == "gs://bucket/ch/rubrics/nb.pdf"
+        # When the rubric is a PDF, text fields default to empty strings
+        # (the model gets the PDF as a Part, so text is just a fallback).
+        assert payload['problem_statement'] == ""
+        assert payload['rubric_text'] == ""
+
 
 # ---------------------------------------------------------------------------
 # get_pdf_submission

@@ -74,6 +74,85 @@ def _teardown(course_handle):
 # ---------------------------------------------------------------------------
 
 
+class TestUploadRubricFile:
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/upload_rubric_file",
+            data={"notebook_id": "lab1", "max_marks": "50.0",
+                  "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                  "assignment_type": "pdf"},
+            files={"file": ("rubric.pdf", b"%PDF-fake", "application/pdf")},
+        )
+        assert resp.status_code == 401
+
+    def test_pdf_rubric_uploaded_to_gcs(self, client):
+        from api_server import courses
+        from database import make_course_handle
+
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            with patch("api_server.upload_blob", return_value="gs://b/path/lab1.pdf") as mock_upload, \
+                 patch("api_server.save_pdf_rubric", new_callable=AsyncMock) as mock_save:
+                resp = client.post(
+                    "/upload_rubric_file",
+                    data={"notebook_id": "lab1", "max_marks": "50.0",
+                          "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                          "assignment_type": "pdf"},
+                    files={"file": ("rubric.pdf", b"%PDF-fake-content", "application/pdf")},
+                    headers={"Authorization": _instructor_header()["Authorization"]},
+                )
+            assert resp.status_code == 200
+            mock_upload.assert_called_once()
+            args = mock_upload.call_args.args
+            # destination_path should put the rubric under <course>/rubrics/<notebook>.pdf
+            assert args[1] == f"{ch}/rubrics/lab1.pdf"
+            mock_save.assert_awaited_once()
+            # The cache reflects the new rubric
+            assert courses[ch]["lab1"]["assignment_type"] == "pdf"
+            assert courses[ch]["lab1"]["rubric_pdf_uri"] == "gs://b/path/lab1.pdf"
+        finally:
+            courses.pop(ch, None)
+
+    def test_rejects_non_pdf_content_type(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            resp = client.post(
+                "/upload_rubric_file",
+                data={"notebook_id": "lab1", "max_marks": "50.0",
+                      "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                      "assignment_type": "pdf"},
+                files={"file": ("rubric.txt", b"hello", "text/plain")},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+            assert "PDF" in resp.text
+        finally:
+            courses.pop(ch, None)
+
+    def test_notebook_assignment_type_returns_400(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            resp = client.post(
+                "/upload_rubric_file",
+                data={"notebook_id": "hw1", "max_marks": "100.0",
+                      "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                      "assignment_type": "notebook"},
+                files={"file": ("rubric.ipynb", b"{}", "application/x-ipynb+json")},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+            assert "upload_rubric_link" in resp.text or "Drive" in resp.text
+        finally:
+            courses.pop(ch, None)
+
+
 class TestUploadPdfRubric:
     def test_pdf_rubric_succeeds(self, client):
         from api_server import courses

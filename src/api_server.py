@@ -2083,6 +2083,90 @@ async def upload_rubric_api(
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
+MAX_RUBRIC_PDF_SIZE_BYTES = 20 * 1024 * 1024
+
+
+@app.post("/upload_rubric_file", response_model=AddRubricResponse)
+async def upload_rubric_file(
+    request: Request,
+    notebook_id: str = Form(...),
+    max_marks: float = Form(...),
+    institution_id: str = Form(...),
+    term_id: str = Form(...),
+    course_id: str = Form(...),
+    assignment_type: str = Form("pdf"),
+    file: UploadFile = File(...),
+):
+    """Upload a rubric file directly (PDF for PDF assignments).
+
+    For ``assignment_type="pdf"``: the PDF is stored at
+    ``gs://{bucket}/{course}/rubrics/{notebook_id}.pdf`` and referenced via
+    ``rubric_pdf_uri`` on the rubric doc. The scoring agent receives this
+    PDF as a multimodal Part alongside each student submission, so figures,
+    tables, and worked examples in the rubric are visible to the model.
+
+    For ``assignment_type="notebook"``: not yet supported via file upload —
+    use /upload_rubric_link to point at a Drive-hosted rubric notebook
+    (added in a follow-up commit).
+
+    Only accessible to instructors / TAs / admins for the named course.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can upload rubrics for this course.")
+
+    if assignment_type != "pdf":
+        raise HTTPException(
+            status_code=400,
+            detail="File upload currently supports assignment_type='pdf'. "
+                   "For notebook rubrics, use /upload_rubric_link with a Drive share link.",
+        )
+
+    if (file.content_type or '') not in ('application/pdf', 'application/x-pdf'):
+        raise HTTPException(status_code=400, detail=f"Expected a PDF file (got content_type={file.content_type!r}).")
+
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(pdf_bytes) > MAX_RUBRIC_PDF_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"Rubric PDF too large ({len(pdf_bytes)} bytes; max {MAX_RUBRIC_PDF_SIZE_BYTES}).")
+
+    destination_path = f"{course_handle}/rubrics/{notebook_id}.pdf"
+    try:
+        rubric_pdf_uri = await asyncio.to_thread(
+            upload_blob, config.bucket_name, destination_path, pdf_bytes, "application/pdf",
+        )
+    except Exception as e:
+        logging.error(f"Failed to upload rubric PDF to GCS: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to upload rubric to GCS: {e}")
+
+    await save_pdf_rubric(
+        config.db, course_handle, notebook_id, max_marks,
+        rubric_pdf_uri=rubric_pdf_uri,
+    )
+
+    # Update the in-memory cache so subsequent grading calls see the new rubric.
+    courses[course_handle][notebook_id] = {
+        'assignment_type': 'pdf',
+        'max_marks': max_marks,
+        'problem_statement': '',
+        'rubric_text': '',
+        'sample_graded_response': '',
+        'rubric_pdf_uri': rubric_pdf_uri,
+        'isactive_eval': True,
+    }
+
+    logging.info(
+        f"Instructor {user_gmail} uploaded PDF rubric for {course_handle}/{notebook_id} → {rubric_pdf_uri}"
+    )
+    return AddRubricResponse(
+        response=f"Rubric '{notebook_id}' uploaded for course '{course_handle}' (rubric_pdf_uri={rubric_pdf_uri}).",
+    )
+
+
 # ==================== PDF Assignment Endpoints ====================
 
 # Hard cap on PDF size during ingest. Larger PDFs probably indicate scanned
@@ -2289,6 +2373,7 @@ async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: R
     problem_statement = rubric.get('problem_statement', '')
     rubric_text = rubric.get('rubric_text', '')
     sample_graded_response = rubric.get('sample_graded_response', '') or ''
+    rubric_pdf_uri = rubric.get('rubric_pdf_uri')
     max_marks_total = rubric.get('max_marks', 0.0)
 
     submissions = await list_pdf_submissions(config.db, course_handle, query_body.notebook_id)
@@ -2318,6 +2403,7 @@ async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: R
                 gcs_uri, runner,
                 config.get_session_service("scoring", course_handle),
                 user_id, course_material=rag_material,
+                rubric_pdf_uri=rubric_pdf_uri,
             )
         except Exception as e:
             logging.error(f"Failed scoring PDF {drive_file_id}: {e}")
@@ -2423,6 +2509,7 @@ async def regrade_pdf_submission(query_body: RegradePdfSubmissionRequest, reques
     problem_statement = rubric.get('problem_statement', '')
     rubric_text = rubric.get('rubric_text', '')
     sample_graded_response = rubric.get('sample_graded_response', '') or ''
+    rubric_pdf_uri = rubric.get('rubric_pdf_uri')
     max_marks_total = rubric.get('max_marks', 0.0)
     gcs_uri = tracking.get('gcs_uri')
     student_ids = tracking.get('student_ids') or [query_body.student_id]
@@ -2443,6 +2530,7 @@ async def regrade_pdf_submission(query_body: RegradePdfSubmissionRequest, reques
         query_body.student_id, course_material=rag_material,
         student_contention=query_body.student_contends,
         previous_grading=previous_grading,
+        rubric_pdf_uri=rubric_pdf_uri,
     )
 
     # Stash the new and previous response so the audit trail is preserved.
