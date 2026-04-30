@@ -271,7 +271,11 @@ if _config.get("gemini_api_key"):
 _SESSION_COLLECTION_NAMES = {
     "instructor": "instructor_sessions",
     "student": "student_sessions",
+    # All scoring variants share a single sessions collection — they're all
+    # instructor-side traffic and the session-per-call uuid keeps them apart.
     "scoring": "instructor_sessions",
+    "scoring_qa": "instructor_sessions",
+    "scoring_report": "instructor_sessions",
 }
 
 _session_service_cache: dict[tuple[str, str], FirestoreSessionService] = {}
@@ -295,11 +299,16 @@ def get_session_service(agent_type: str, course_handle: str) -> FirestoreSession
 
 _runner_cache = {}
 
-# Map agent_type -> the key in the courses cache that holds the custom prompt
+# Map agent_type -> the field on the course doc that holds the per-course
+# prompt override (set via /update_course_prompt). When the override is unset
+# the default template from agent.py is used — both paths are then run
+# through agent.format_prompt() so course_name/course_topics get filled in.
 _PROMPT_KEYS = {
     "instructor": "instructor_assist_prompt",
     "student": "student_assist_prompt",
-    "scoring": "scoring_assist_prompt",
+    "scoring": "scoring_qa_prompt",          # legacy alias points to qa
+    "scoring_qa": "scoring_qa_prompt",
+    "scoring_report": "scoring_report_prompt",
 }
 
 def get_runner(agent_type: str, courses: dict | None = None,
@@ -307,38 +316,62 @@ def get_runner(agent_type: str, courses: dict | None = None,
     """Get or create a Runner for the given agent type and course (cached).
 
     When *course_handle* and *courses* are provided the runner is built with
-    the course-specific model and prompt (falling back to defaults when the
-    course has no overrides).  Runners are cached per (agent_type, course_handle).
+    the course-specific model, prompt-override (if any), and the course's
+    ``course_name`` / ``course_topics`` (filled into the prompt's
+    ``<<course_name>>`` / ``<<course_topics>>`` placeholders). Runners are
+    cached per (agent_type, course_handle); call invalidate_course_runners()
+    after changing any of those fields so the next call rebuilds the runner.
 
     Each runner receives a per-course session service so that session data is
     stored under ``courses/{course_handle}/...`` in Firestore.
     """
-    # Resolve model and prompt from the course cache (if available)
+    # Resolve model, prompt override, and course identity from the cache.
     model = agent.DEFAULT_MODEL
     instruction = None
+    course_name = ""
+    course_topics = ""
     if courses and course_handle and course_handle in courses:
         course_data = courses[course_handle]
         model = course_data.get('ai_model') or agent.DEFAULT_MODEL
         prompt_key = _PROMPT_KEYS.get(agent_type)
         if prompt_key:
             instruction = course_data.get(prompt_key) or None
+        course_name = course_data.get('course_name') or ""
+        course_topics = course_data.get('course_topics') or ""
 
     key = (agent_type, course_handle)
     if key not in _runner_cache:
         if agent_type not in _SESSION_COLLECTION_NAMES:
             raise ValueError(f"Unknown agent type: {agent_type}")
         session_svc = get_session_service(agent_type, course_handle or "")
-        ag = agent.create_agent(agent_type, model, instruction=instruction,
-                                course_handle=course_handle)
+        ag = agent.create_agent(
+            agent_type, model, instruction=instruction,
+            course_handle=course_handle,
+            course_name=course_name,
+            course_topics=course_topics,
+        )
         _runner_cache[key] = Runner(
             app_name="ai_ta", agent=ag, session_service=session_svc
         )
     return _runner_cache[key]
 
 def invalidate_course_runners(course_handle: str):
-    """Remove cached runners for a course so they are recreated with new settings."""
+    """Remove cached runners and agents for a course so they're rebuilt fresh.
+
+    Call this after changing any course field that influences the agent
+    construction: ``ai_model``, the per-course prompt overrides
+    (``instructor_assist_prompt`` etc.), ``course_name``, or
+    ``course_topics``. Both the Runner cache and the underlying Agent cache
+    are cleared so the next ``get_runner`` rebuilds with the latest values.
+    """
     for agent_type in _SESSION_COLLECTION_NAMES:
         _runner_cache.pop((agent_type, course_handle), None)
+        # Agents are cached by (agent_type, model, course_handle) — drop
+        # every (agent_type, *, course_handle) so a model change is also
+        # picked up.
+        for cache_key in list(agent._agent_cache.keys()):
+            if cache_key[0] == agent_type and cache_key[2] == course_handle:
+                agent._agent_cache.pop(cache_key, None)
 
 # Pre-populate cache with default runners (course_handle=None → defaults)
 runner_instructor = get_runner("instructor")

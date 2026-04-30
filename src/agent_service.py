@@ -185,6 +185,109 @@ async def score_question(question: str, answer: str, rubric: str, runner: Runner
 
     return marks, response_text
 
+async def score_pdf_submission(
+    problem_statement: str,
+    rubric_text: str,
+    sample_graded_response: str,
+    gcs_uri: str,
+    runner: Runner,
+    session_service: FirestoreSessionService,
+    user_id: str,
+    course_material: str = "",
+    student_contention: str = "",
+    previous_grading: str = "",
+    rubric_pdf_uri: str | None = None,
+) -> tuple[float, str]:
+    """Score a holistic PDF report using the scoring agent.
+
+    The student's PDF is referenced by its GCS URI (Vertex AI accepts
+    ``gs://`` URIs in multimodal Parts), so figures, tables, and plots are
+    visible to the model without us needing to extract text. When
+    ``rubric_pdf_uri`` is supplied, the rubric itself is attached as a
+    second multimodal Part so the model also sees rubric figures / tables /
+    worked examples.
+
+    Args:
+        problem_statement: Free-text problem statement (may be empty when
+            the rubric PDF already contains it).
+        rubric_text: Free-text rubric (may be empty when rubric_pdf_uri set).
+        sample_graded_response: One-shot example of a graded response.
+        gcs_uri: ``gs://...`` URI of the student's PDF report.
+        runner: ADK Runner wrapping the scoring agent.
+        session_service: Per-course session service (fresh session per call).
+        user_id: ID we surface to the agent (the student's id).
+        course_material: Optional RAG context.
+        student_contention: Optional contention text from the student (regrade flow).
+        previous_grading: Optional prior agent response (regrade flow).
+        rubric_pdf_uri: Optional ``gs://`` URI of a rubric PDF.
+
+    Returns:
+        Tuple of (marks, response_text). Raises HTTPException(500) if the
+        agent fails or no marks can be parsed.
+    """
+    try:
+        session_id = str(uuid.uuid4())
+        await session_service.create_session(
+            app_name=runner.app_name,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        # Build the textual prompt around the PDF Parts.
+        pieces: list[str] = []
+        if course_material:
+            pieces.append("{Relevant course material:} " + truncate_text(course_material))
+        if problem_statement:
+            pieces.append("{The assignment problem statement is:} " + truncate_text(problem_statement))
+        if rubric_pdf_uri:
+            pieces.append(
+                "{The scoring rubric (PDF) is attached. It contains the "
+                "problem statement, scoring criteria, and may include a "
+                "sample graded response.}"
+            )
+        if rubric_text:
+            pieces.append("{The scoring rubric (text) is:} " + truncate_text(rubric_text))
+        if sample_graded_response:
+            pieces.append("{A sample graded response (for reference, not for re-grading):} "
+                          + truncate_text(sample_graded_response))
+        if previous_grading:
+            pieces.append("{The agent's previous grading was:} " + truncate_text(previous_grading))
+        if student_contention:
+            pieces.append("{The student contends:} " + truncate_text(student_contention))
+        pieces.append("{The student's submitted report (PDF) is attached.}")
+        pieces.append(
+            "Score the student's report against the rubric. Reason about the "
+            "components in the rubric, justify deductions, and conclude with a "
+            "line of the form: The total marks is <number>."
+        )
+        full_prompt = truncate_prompt(" ".join(pieces))
+
+        parts = [types.Part.from_text(text=full_prompt)]
+        if rubric_pdf_uri:
+            parts.append(types.Part.from_uri(file_uri=rubric_pdf_uri, mime_type="application/pdf"))
+        parts.append(types.Part.from_uri(file_uri=gcs_uri, mime_type="application/pdf"))
+        content = types.Content(role="user", parts=parts)
+
+        logging.debug(f"PDF scoring prompt for user {user_id}: {full_prompt[:500]}...")
+        response_text = await run_agent_and_get_response(session_id, user_id, content, runner)
+
+    except Exception as e:
+        logging.error(f"Error in score_pdf_submission: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal error occurred while scoring the PDF: {e}")
+
+    if not response_text:
+        raise HTTPException(status_code=500, detail="Scoring agent returned no response for PDF.")
+
+    marks = 0.0
+    marks_match = re.search(r"total\s+marks\D+(\d+\.?\d*)", response_text, re.IGNORECASE)
+    if marks_match:
+        marks = float(marks_match.group(1))
+    else:
+        raise HTTPException(status_code=500, detail="Could not extract total marks from PDF scoring response.")
+
+    return marks, response_text
+
+
 async def get_rubric_answers(rubric_cells:list) -> dict:
     '''
     Extract the rubric answers from the rubric notebook cells.

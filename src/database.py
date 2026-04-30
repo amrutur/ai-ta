@@ -109,15 +109,20 @@ async def load_notebooks_from_db(db, course_handle: str) -> dict:
         logging.error(f"Failed to load notebooks for course '{course_handle}': {e}")
     return notebooks
 
-async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict, outputs:dict):
-    ''' Save the notebook's rubric information to the Firestore database under Notebooks
-        subcollection for this course.
+async def save_rubric(db, course_handle:str, notebook_id:str, max_marks: float, context:dict, questions:dict, answers:dict, outputs:dict, assignment_type: str = "q&a"):
+    ''' Save the q&a / Colab rubric to courses/{ch}/Notebooks/{nb}.
 
-        Holds the context, questions, and answers for the rubric notebook, which will be used by the grading agent when grading student submissions. Also saves the max_marks for the notebook, which is used to calculate the final grade percentage for the submission.
+        Holds the context, questions, and answers parsed from the rubric
+        notebook, used by the scoring agent when grading per-question
+        submissions. Tags the rubric with assignment_type=<arg> (default
+        "q&a") and submission_type="colab" so the dispatcher in
+        /grade_assignment routes to the right scorer.
     '''
     try:
         rubric_ref = db.collection(u'courses').document(course_handle).collection(u'Notebooks').document(notebook_id)
         await rubric_ref.set({
+            u'assignment_type': assignment_type,
+            u'submission_type': 'colab',
             u'max_marks': max_marks,
             u'context': context,
             u'questions': questions,
@@ -661,6 +666,348 @@ async def create_course(db, course_data: dict) -> bool:
         raise HTTPException(status_code=500, detail="An unexpected error occurred while creating the course.")
     
     return False
+
+
+# ===========================================================================
+# PDF-assignment helpers
+#
+# PDF submissions live in two places to keep things idempotent and to let the
+# existing fetch/notify/marks endpoints work unchanged:
+#
+#   1. Canonical per-PDF tracking doc (one per Drive file):
+#        courses/{ch}/Notebooks/{nb}/pdf_submissions/{drive_file_id}
+#      Holds drive metadata, GCS path, resolved student_ids, and the grade.
+#
+#   2. Per-student mirror doc (one per author of each PDF):
+#        courses/{ch}/Students/{sid}/Notebooks/{nb}
+#      Mirrors the grade so /fetch_marks_list, /fetch_grader_response, and
+#      /notify_student_grades work with no changes.
+# ===========================================================================
+
+PDF_SUBMISSIONS_SUBCOLLECTION = "pdf_submissions"
+
+
+async def save_pdf_rubric(
+    db,
+    course_handle: str,
+    notebook_id: str,
+    max_marks: float,
+    problem_statement: str = "",
+    rubric_text: str = "",
+    sample_graded_response: str | None = None,
+    rubric_pdf_uri: str | None = None,
+    assignment_type: str = "report",
+):
+    """Save a PDF-submission rubric under courses/{ch}/Notebooks/{nb}.
+
+    Either the text fields (problem_statement + rubric_text) or
+    ``rubric_pdf_uri`` (a ``gs://`` path to a rubric PDF on GCS) must be
+    provided. When ``rubric_pdf_uri`` is set the scoring agent receives the
+    rubric PDF as a multimodal Part alongside each student submission, so
+    figures, tables, and worked examples in the rubric are visible to the
+    model. The text fields remain useful as a fallback or supplement.
+
+    Sets ``submission_type='pdf'`` and ``assignment_type=<arg>`` (default
+    "report"). Always enables eval — instructor toggles it off via
+    /disable_eval if needed.
+    """
+    try:
+        rubric_ref = (db.collection('courses').document(course_handle)
+                      .collection('Notebooks').document(notebook_id))
+        payload = {
+            'assignment_type': assignment_type,
+            'submission_type': 'pdf',
+            'max_marks': max_marks,
+            'problem_statement': problem_statement or '',
+            'rubric_text': rubric_text or '',
+            'sample_graded_response': sample_graded_response or '',
+            'isactive_eval': True,
+            'last_updated': firestore.SERVER_TIMESTAMP,
+        }
+        if rubric_pdf_uri is not None:
+            payload['rubric_pdf_uri'] = rubric_pdf_uri
+        await rubric_ref.set(payload, merge=True)
+    except google_exceptions.PermissionDenied:
+        logging.error("Service account permission denied while saving PDF rubric.")
+        raise HTTPException(status_code=500, detail="Database access denied.")
+    except google_exceptions.GoogleAPICallError as e:
+        logging.error(f"Firestore error saving PDF rubric: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except Exception as e:
+        logging.error(f"Unexpected error saving PDF rubric: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while saving the rubric.")
+
+
+def _pdf_submission_ref(db, course_handle: str, notebook_id: str, drive_file_id: str):
+    return (db.collection('courses').document(course_handle)
+            .collection('Notebooks').document(notebook_id)
+            .collection(PDF_SUBMISSIONS_SUBCOLLECTION).document(drive_file_id))
+
+
+async def get_pdf_submission(db, course_handle: str, notebook_id: str, drive_file_id: str) -> dict | None:
+    """Return the per-PDF tracking doc, or None if not present."""
+    try:
+        doc = await _pdf_submission_ref(db, course_handle, notebook_id, drive_file_id).get()
+        return doc.to_dict() if doc.exists else None
+    except Exception as e:
+        logging.error(f"Error fetching pdf_submission {drive_file_id}: {e}")
+        return None
+
+
+async def list_pdf_submissions(db, course_handle: str, notebook_id: str) -> list[dict]:
+    """Return all per-PDF tracking docs for a notebook."""
+    out = []
+    try:
+        ref = (db.collection('courses').document(course_handle)
+               .collection('Notebooks').document(notebook_id)
+               .collection(PDF_SUBMISSIONS_SUBCOLLECTION))
+        async for doc in ref.stream():
+            data = doc.to_dict() or {}
+            data['drive_file_id'] = doc.id
+            out.append(data)
+    except Exception as e:
+        logging.error(f"Error listing pdf_submissions for {course_handle}/{notebook_id}: {e}")
+    return out
+
+
+async def upsert_pdf_submission(
+    db,
+    course_handle: str,
+    notebook_id: str,
+    drive_file_id: str,
+    drive_modified_time: str,
+    gcs_uri: str,
+    original_filename: str,
+    extracted_authors: list[str],
+    student_ids: list[str],
+):
+    """Write the per-PDF tracking doc and seed mirror docs for every author.
+
+    Mirror docs hold ``assignment_type='pdf'``, ``drive_file_id``, ``gcs_uri``,
+    and the co-author list — everything else (marks, grader_response, graded_at)
+    is filled in later by the grading flow. Existing graded_at on a mirror doc
+    is preserved across re-ingest of an unchanged PDF.
+    """
+    try:
+        ref = _pdf_submission_ref(db, course_handle, notebook_id, drive_file_id)
+        await ref.set({
+            'drive_file_id': drive_file_id,
+            'drive_modified_time': drive_modified_time,
+            'gcs_uri': gcs_uri,
+            'original_filename': original_filename,
+            'extracted_authors': extracted_authors,
+            'student_ids': student_ids,
+            'ingested_at': firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+
+        # Seed per-student mirror docs.
+        for sid in student_ids:
+            mirror_ref = (db.collection('courses').document(course_handle)
+                          .collection('Students').document(sid)
+                          .collection('Notebooks').document(notebook_id))
+            await mirror_ref.set({
+                'assignment_type': 'pdf',
+                'drive_file_id': drive_file_id,
+                'gcs_uri': gcs_uri,
+                'original_filename': original_filename,
+                'co_authors': [s for s in student_ids if s != sid],
+                'submitted_at': firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+    except google_exceptions.PermissionDenied:
+        raise HTTPException(status_code=500, detail="Database access denied.")
+    except google_exceptions.GoogleAPICallError as e:
+        logging.error(f"Firestore error during upsert_pdf_submission: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
+    except Exception as e:
+        logging.error(f"Unexpected error in upsert_pdf_submission: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while saving the PDF submission.")
+
+
+async def update_pdf_submission_grade(
+    db,
+    course_handle: str,
+    notebook_id: str,
+    drive_file_id: str,
+    student_ids: list[str],
+    total_marks: float,
+    max_marks: float,
+    grader_response: dict,
+):
+    """Write grade to the per-PDF tracking doc + all per-student mirror docs.
+
+    ``grader_response`` is a dict (typically ``{"overall": {"marks": .., "response": ..}}``)
+    so it lines up with the per-question-keyed dict used for notebook grading
+    and ``/fetch_grader_response`` keeps working with no client changes.
+    """
+    try:
+        ref = _pdf_submission_ref(db, course_handle, notebook_id, drive_file_id)
+        await ref.set({
+            'total_marks': total_marks,
+            'max_marks': max_marks,
+            'grader_response': grader_response,
+            'graded_at': firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+
+        for sid in student_ids:
+            mirror_ref = (db.collection('courses').document(course_handle)
+                          .collection('Students').document(sid)
+                          .collection('Notebooks').document(notebook_id))
+            await mirror_ref.set({
+                'total_marks': total_marks,
+                'max_marks': max_marks,
+                'grader_response': grader_response,
+                'graded_at': firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+    except Exception as e:
+        logging.error(f"Error in update_pdf_submission_grade: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error while updating PDF marks.")
+
+
+async def upsert_student(
+    db,
+    course_handle: str,
+    email: str,
+    name: str,
+    roll_no: str | None = None,
+) -> str:
+    """Insert or update a student record from a roster row.
+
+    Used by /upload_student_roster: pre-populates the Students subcollection
+    with name + email so the PDF ingest flow's fuzzy author matcher can
+    resolve names to canonical email-keyed records.
+
+    For an existing student, refreshes ``name`` and ``roll_no`` if supplied
+    but preserves ``created_at`` and any per-student state already there
+    (e.g. ``initialized``, graded notebooks). For a new student, creates the
+    record with ``initialized=True`` so it's not flagged as a placeholder.
+
+    Returns ``"added"`` or ``"updated"``.
+    """
+    course_ref = db.collection('courses').document(course_handle)
+    course_doc = await course_ref.get()
+    if not course_doc.exists:
+        raise CourseNotFoundError(course_handle)
+
+    student_ref = course_ref.collection('Students').document(email)
+    student_doc = await student_ref.get()
+
+    payload: dict[str, Any] = {'name': name, 'initialized': True}
+    if roll_no is not None and roll_no != '':
+        payload['roll_no'] = roll_no
+
+    if student_doc.exists:
+        # Don't clobber created_at or pending_review etc.
+        await student_ref.set(payload, merge=True)
+        return "updated"
+    else:
+        payload['created_at'] = firestore.SERVER_TIMESTAMP
+        await student_ref.set(payload)
+        return "added"
+
+
+async def list_placeholder_students(db, course_handle: str) -> dict[str, dict]:
+    """Return ``{placeholder_student_id: {name, ...}}`` for all @pending.local students.
+
+    Used during roster upload to detect placeholders that fuzzy-match a real
+    roster entry, so the response can highlight them for the instructor.
+    """
+    out: dict[str, dict] = {}
+    try:
+        students_ref = (db.collection('courses').document(course_handle)
+                        .collection('Students'))
+        async for doc in students_ref.stream():
+            if doc.id.endswith('@pending.local'):
+                out[doc.id] = doc.to_dict() or {}
+    except Exception as e:
+        logging.error(f"Error listing placeholder students for {course_handle}: {e}")
+    return out
+
+
+async def add_placeholder_student(db, course_handle: str, student_id: str, name: str, drive_file_id: str):
+    """Create a placeholder student record for an unmatched PDF author.
+
+    Marked with ``pending_review=True`` and ``initialized=False`` so the
+    instructor can spot and merge/clean up these records later.
+    """
+    try:
+        course_ref = db.collection('courses').document(course_handle)
+        course_doc = await course_ref.get()
+        if not course_doc.exists:
+            raise CourseNotFoundError(course_handle)
+        student_ref = course_ref.collection('Students').document(student_id)
+        student_doc = await student_ref.get()
+        if student_doc.exists:
+            return  # already present — no-op
+        await student_ref.set({
+            'name': name,
+            'initialized': False,
+            'pending_review': True,
+            'created_from_drive_file_id': drive_file_id,
+            'created_at': firestore.SERVER_TIMESTAMP,
+        })
+    except CourseNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    except Exception as e:
+        logging.error(f"Error creating placeholder student '{student_id}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to create placeholder student.")
+
+
+async def delete_student_pdf_mirror(
+    db, course_handle: str, student_id: str, notebook_id: str,
+) -> bool:
+    """Delete a per-student PDF submission mirror doc.
+
+    Returns True if a doc was deleted, False if it didn't exist or the
+    delete failed. Used by /reassign_pdf_submission when moving a
+    submission off a placeholder student onto real student records.
+    Note: only deletes the mirror doc — not the placeholder Student
+    record itself; the instructor can clean those up separately.
+    """
+    try:
+        ref = (db.collection('courses').document(course_handle)
+               .collection('Students').document(student_id)
+               .collection('Notebooks').document(notebook_id))
+        doc = await ref.get()
+        if not doc.exists:
+            return False
+        await ref.delete()
+        return True
+    except Exception as e:
+        logging.error(f"Error deleting mirror doc for {student_id}/{notebook_id}: {e}")
+        return False
+
+
+async def get_student_pdf_mirror(
+    db, course_handle: str, student_id: str, notebook_id: str,
+) -> dict | None:
+    """Return the per-student PDF submission mirror doc, or None if missing."""
+    try:
+        ref = (db.collection('courses').document(course_handle)
+               .collection('Students').document(student_id)
+               .collection('Notebooks').document(notebook_id))
+        doc = await ref.get()
+        return doc.to_dict() if doc.exists else None
+    except Exception as e:
+        logging.error(f"Error fetching mirror doc for {student_id}/{notebook_id}: {e}")
+        return None
+
+
+async def get_student_directory(db, course_handle: str) -> dict[str, str]:
+    """Return ``{student_id: name}`` for every enrolled student in the course.
+
+    Used by the PDF ingest flow to fuzzy-match extracted author names to
+    existing students.
+    """
+    out: dict[str, str] = {}
+    try:
+        students_ref = (db.collection('courses').document(course_handle)
+                        .collection('Students'))
+        async for doc in students_ref.stream():
+            data = doc.to_dict() or {}
+            out[doc.id] = data.get('name', '') or ''
+    except Exception as e:
+        logging.error(f"Error fetching student directory for {course_handle}: {e}")
+    return out
 
 
 async def fetch_grader_response(db, course_handle:str, notebook_id: str = None, student_id: str = None)-> dict:

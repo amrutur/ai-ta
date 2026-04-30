@@ -11,26 +11,31 @@ import pytest
 from pydantic import ValidationError
 
 from models import (
+    AddRubricRequest,
+    AddRubricResponse,
     AssistRequest,
     AssistResponse,
-    GradeRequest,
-    GradeResponse,
+    CreateCourseRequest,
+    CreateCourseResponse,
     EvalRequest,
     EvalResponse,
     FetchGradedRequest,
     FetchGradedResponse,
     FetchMarksListRequest,
     FetchMarksListResponse,
-    RegisterStudentRequest,
-    RegisterStudentResponse,
+    GradePdfAssignmentRequest,
+    GradeRequest,
+    GradeResponse,
+    IngestPdfSubmissionsRequest,
+    IngestPdfSubmissionsResponse,
     NotifyGradedRequest,
     NotifyGradedResponse,
-    CreateCourseRequest,
-    CreateCourseResponse,
+    RegisterStudentRequest,
+    RegisterStudentResponse,
+    RegradePdfSubmissionRequest,
+    RegradePdfSubmissionResponse,
     TutorInteractionRequest,
     TutorInteractionResponse,
-    AddRubricRequest,
-    AddRubricResponse,
     UpdateCourseConfigRequest,
 )
 
@@ -159,10 +164,82 @@ class TestAddRubricRequest:
             course_id="6.001",
         )
         assert req.max_marks == 100.0
+        # Default assignment_type is "q&a" (per-question rubric, the most
+        # common case). Submission_type defaults to None — the endpoint
+        # infers "colab" from assignment_type when unset.
+        assert req.assignment_type == "q&a"
+        assert req.submission_type is None
+
+    def test_legacy_assignment_type_values_accepted(self):
+        # Old clients still send 'notebook' / 'pdf'; the model accepts the
+        # raw string, the endpoint maps it to the new pair on write.
+        req = AddRubricRequest(
+            notebook_id="hw1", max_marks=100.0,
+            institution_id="mit", term_id="2025", course_id="6.001",
+            assignment_type="pdf",
+            problem_statement="x", rubric_text="y",
+        )
+        assert req.assignment_type == "pdf"
 
     def test_has_outputs(self):
         """outputs field must exist (was missing in an earlier version)."""
         assert "outputs" in AddRubricRequest.model_fields
+
+    def test_pdf_mode_omits_notebook_fields(self):
+        req = AddRubricRequest(
+            notebook_id="lab1",
+            max_marks=50.0,
+            institution_id="iisc",
+            term_id="2025-26",
+            course_id="cp260",
+            assignment_type="pdf",
+            problem_statement="Build a TCP server",
+            rubric_text="Correctness 30, code quality 20",
+            sample_graded_response="Sample graded text",
+        )
+        assert req.assignment_type == "pdf"
+        assert req.problem_statement == "Build a TCP server"
+        assert req.context is None
+        assert req.questions is None
+
+
+# ---------------------------------------------------------------------------
+# IngestPdfSubmissionsRequest / GradePdfAssignmentRequest / RegradePdfSubmissionRequest
+# ---------------------------------------------------------------------------
+
+
+class TestPdfModeRequests:
+    def test_ingest(self):
+        req = IngestPdfSubmissionsRequest(
+            institution_id="iisc", term_id="2025-26", course_id="cp260",
+            notebook_id="lab1",
+            drive_folder_url="https://drive.google.com/drive/folders/ABC",
+        )
+        assert req.drive_folder_url.endswith("/folders/ABC")
+
+    def test_ingest_response_default_lists_empty(self):
+        resp = IngestPdfSubmissionsResponse()
+        assert resp.ingested == [] and resp.skipped == [] and resp.failed == []
+
+    def test_grade_pdf_assignment(self):
+        req = GradePdfAssignmentRequest(
+            institution_id="iisc", term_id="2025-26", course_id="cp260",
+            notebook_id="lab1",
+        )
+        assert req.do_regrade is False
+
+    def test_regrade_pdf_submission(self):
+        req = RegradePdfSubmissionRequest(
+            institution_id="iisc", term_id="2025-26", course_id="cp260",
+            notebook_id="lab1",
+            student_id="alice@iisc.ac.in",
+        )
+        assert req.do_regrade is True
+        assert req.student_contends == ""
+
+    def test_regrade_pdf_submission_response(self):
+        resp = RegradePdfSubmissionResponse(response="Re-evaluated", marks=42.0)
+        assert resp.marks == 42.0
 
 
 # ---------------------------------------------------------------------------

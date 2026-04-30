@@ -1,13 +1,100 @@
 """
-Google Drive utilities for downloading Colab notebooks.
+Google Drive utilities for downloading Colab notebooks and PDF submissions.
 """
 
 import io
+import logging
+import re
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
+
+DRIVE_READONLY_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+
+
+def _build_drive_service(service_account_info: dict):
+    """Construct a Drive v3 service client from service-account credentials."""
+    credentials = service_account.Credentials.from_service_account_info(
+        service_account_info, scopes=DRIVE_READONLY_SCOPES,
+    )
+    return build('drive', 'v3', credentials=credentials)
+
+
+def describe_drive_error(exc: Exception) -> dict:
+    """Convert a Drive API exception into a JSON-friendly diagnostic dict.
+
+    Returns ``{type, status, reason, message, hint}`` where:
+      - ``type``    : Python class name of the exception
+      - ``status``  : HTTP status from googleapiclient.errors.HttpError, or None
+      - ``reason``  : Google API ``reason`` field if present (e.g.
+        ``"insufficientPermissions"``, ``"notFound"``)
+      - ``message`` : the underlying error message
+      - ``hint``    : a human-readable suggestion (e.g. share with SA, enable API)
+
+    Used by the server to give callers actionable detail beyond a generic
+    "Could not access folder" 502.
+    """
+    info: dict = {
+        "type": type(exc).__name__,
+        "status": None,
+        "reason": None,
+        "message": str(exc),
+        "hint": None,
+    }
+
+    if isinstance(exc, HttpError):
+        info["status"] = getattr(getattr(exc, "resp", None), "status", None)
+        # googleapiclient stores the JSON body on .error_details / .reason in
+        # newer versions; fall back to parsing _get_reason() for older ones.
+        try:
+            reason = exc.error_details[0].get("reason") if exc.error_details else None
+        except Exception:
+            reason = None
+        if not reason:
+            try:
+                reason = exc._get_reason()  # type: ignore[attr-defined]
+            except Exception:
+                reason = None
+        info["reason"] = reason
+
+        if info["status"] == 404:
+            info["hint"] = (
+                "Drive resource not found. Either the file/folder ID is wrong, "
+                "the resource is in the trash, or it is not shared with the "
+                "service account."
+            )
+        elif info["status"] == 403:
+            if reason == "insufficientFilePermissions":
+                info["hint"] = (
+                    "The service account is authenticated but the resource is "
+                    "not shared with it. 'Anyone with the link' sharing is "
+                    "often not enough — share the folder/file directly with "
+                    "the service account email (Viewer access)."
+                )
+            elif reason == "accessNotConfigured":
+                info["hint"] = (
+                    "The Drive API is not enabled for the service account's "
+                    "GCP project. Enable it at "
+                    "console.cloud.google.com/apis/library/drive.googleapis.com."
+                )
+            else:
+                info["hint"] = (
+                    "Permission denied. Most commonly this means the folder "
+                    "isn't shared with the service account. 'Anyone with the "
+                    "link' sharing can be unreliable for service-account "
+                    "access — share the folder directly with the SA email."
+                )
+        elif info["status"] == 401:
+            info["hint"] = (
+                "Service account credentials rejected by Drive. Check the "
+                "Firestore SA key and that the SA hasn't been disabled."
+            )
+        elif info["status"] == 429:
+            info["hint"] = "Drive API quota exhausted; retry after a backoff."
+
+    return info
 
 
 def get_file_id_from_share_link(share_link: str) -> str or None:
@@ -45,6 +132,82 @@ def get_file_id_from_share_link(share_link: str) -> str or None:
         print("Could not extract file ID from the share link.")
         return None
 
+def extract_folder_id_from_link(folder_link: str) -> str or None:
+    """Extract the folder ID from a Google Drive folder share link.
+
+    Supports the common shapes:
+      https://drive.google.com/drive/folders/{ID}
+      https://drive.google.com/drive/folders/{ID}?usp=sharing
+      https://drive.google.com/drive/u/0/folders/{ID}
+    """
+    if not folder_link:
+        return None
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", folder_link)
+    if match:
+        return match.group(1)
+    return None
+
+
+def download_file_bytes_sa(service_account_info: dict, file_id: str) -> bytes or None:
+    """Download a Drive file by ID and return raw bytes.
+
+    Returns ``None`` on HTTP error so callers can decide whether to skip
+    or surface it. Other exceptions propagate.
+    """
+    try:
+        drive_service = _build_drive_service(service_account_info)
+        request = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return fh.getvalue()
+    except HttpError as error:
+        status = getattr(getattr(error, 'resp', None), 'status', None)
+        if status == 404:
+            logging.error(
+                f"Drive file '{file_id}' not found (404). "
+                "Check the ID and that the file/folder is shared with the service account."
+            )
+        elif status == 403:
+            logging.error(
+                f"Permission denied (403) for Drive file '{file_id}'. "
+                "Ensure the Drive API is enabled and the folder is shared with the service account."
+            )
+        else:
+            logging.error(f"Drive download failed for '{file_id}': {error}")
+        return None
+
+
+def list_pdfs_in_folder_sa(service_account_info: dict, folder_id: str) -> list[dict]:
+    """List PDF files (non-trashed) directly inside a Drive folder.
+
+    Returns a list of dicts with keys ``id``, ``name``, ``modifiedTime``, and
+    ``size`` — the fields needed downstream for idempotent ingest.
+    """
+    drive_service = _build_drive_service(service_account_info)
+    files: list[dict] = []
+    page_token = None
+    query = (
+        f"'{folder_id}' in parents and "
+        "mimeType='application/pdf' and trashed=false"
+    )
+    while True:
+        response = drive_service.files().list(
+            q=query,
+            spaces='drive',
+            fields='nextPageToken, files(id, name, modifiedTime, size)',
+            pageToken=page_token,
+            pageSize=100,
+        ).execute()
+        files.extend(response.get('files', []))
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
+    return files
+
+
 def get_notebook_content_from_link_sa(service_account_info: dict, file_id: str):
     """
     Downloads content of a google colab notebook from a given file_id using a service account.
@@ -57,9 +220,7 @@ def get_notebook_content_from_link_sa(service_account_info: dict, file_id: str):
         The content of the notebook as a string, or None if not found.
     """
     try:
-        scopes = ["https://www.googleapis.com/auth/drive.readonly"]
-        credentials = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
-        drive_service = build('drive', 'v3', credentials=credentials)
+        drive_service = _build_drive_service(service_account_info)
 
         # Download the file content
         request = drive_service.files().get_media(fileId=file_id)

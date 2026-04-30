@@ -107,10 +107,21 @@ class NotifyGradedResponse(BaseModel):
 
 
 class CreateCourseRequest(BaseModel):
+    """Body for POST /create_course.
+
+    The agent prompts (``instructor_assist_prompt`` etc.) are no longer
+    accepted at create time — they're long, multi-paragraph, and impractical
+    to paste into a single JSON request. Use POST /update_course_prompt
+    after creation if you need to override a default. The course_name and
+    course_topics fields are filled into the prompts'
+    ``<<course_name>>`` / ``<<course_topics>>`` placeholders at agent
+    creation time.
+    """
     course_id: str
     term_id: str
     institution_id: str
     course_name: str | None = None
+    course_topics: str | None = None
     instructor_email: EmailStr|None = None
     instructor_gmail: EmailStr|None = None
     instructor_name: str | None = None
@@ -120,9 +131,6 @@ class CreateCourseRequest(BaseModel):
     ta_email: EmailStr | None = None
     ta_gmail: EmailStr | None = None
     ai_model: str | None = None
-    instructor_assist_prompt: str | None = None
-    student_assist_prompt: str | None = None
-    scoring_assist_prompt: str | None = None
 
 class CreateCourseResponse(BaseModel):
     response: str
@@ -145,18 +153,227 @@ class ListResponse(BaseModel):
     listname: list[str]
 
 class AddRubricRequest(BaseModel):
+    """Add or replace a rubric for an assignment.
+
+    The rubric carries two orthogonal flags:
+
+    - ``assignment_type``: ``"q&a"`` (per-question scoring) or ``"report"``
+      (holistic scoring). For backward compatibility the legacy values
+      ``"notebook"`` and ``"pdf"`` are also accepted and mapped:
+      ``"notebook"`` → ``"q&a"`` + ``submission_type="colab"``; ``"pdf"`` →
+      ``"report"`` + ``submission_type="pdf"``.
+    - ``submission_type``: ``"colab"`` or ``"pdf"`` — the format students
+      submit in. Defaults are inferred from the assignment_type when
+      omitted (q&a→colab, report→pdf).
+    """
     notebook_id: str
     max_marks: float
-    context: Dict[str,Any]
-    questions: Dict[str,Any]
-    answers: Dict[str, Any]
-    outputs: Dict[str,Any]
     institution_id: str
     term_id: str
     course_id: str
- 
+    # q&a / Colab rubric body (optional so report rubrics can omit them).
+    context: Dict[str, Any] | None = None
+    questions: Dict[str, Any] | None = None
+    answers: Dict[str, Any] | None = None
+    outputs: Dict[str, Any] | None = None
+    # report / PDF rubric body (optional so q&a rubrics can omit them).
+    problem_statement: str | None = None
+    rubric_text: str | None = None
+    sample_graded_response: str | None = None
+    # Discriminators. Default keeps existing clients working: notebook → q&a+colab.
+    assignment_type: str = "q&a"
+    submission_type: str | None = None
+
 class AddRubricResponse(BaseModel):
     response: str
+
+
+class DebugPdfAuthorsRequest(BaseModel):
+    """Body for POST /debug_pdf_authors — see what author extraction does on a Drive PDF.
+
+    Diagnostic endpoint — runs the same pypdf+Gemini pipeline that ingest
+    uses, but on a single file and returns rich detail (text length, raw
+    LLM response, fuzzy-match results against the current roster) so the
+    instructor can see why authors weren't picked up.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    drive_url: str
+
+class DebugPdfAuthorsRosterMatch(BaseModel):
+    extracted_name: str
+    matched_email: str | None = None
+    would_create_placeholder: bool
+
+class DebugPdfAuthorsResponse(BaseModel):
+    ok: bool
+    drive_file_id: str | None = None
+    filename: str | None = None
+    sa_email: str
+    pdf_size_bytes: int = 0
+    text_extracted_chars: int = 0
+    text_sample: str = ""             # first ~1000 chars of extracted text
+    extracted_authors: List[str] = []
+    llm_debug: Dict[str, Any] = {}    # model, prompt_chars, llm_raw_response, parsed, error
+    roster_matches: List[DebugPdfAuthorsRosterMatch] = []
+    error: str | None = None
+    hint: str | None = None
+
+
+class ReassignPdfSubmissionRequest(BaseModel):
+    """Body for POST /reassign_pdf_submission.
+
+    Moves a PDF submission's grade off whatever student_ids are currently
+    on the per-PDF tracking doc and onto the supplied list of real student
+    emails. Used to fix attributions when author extraction created
+    @pending.local placeholders. The grade is preserved (not regraded);
+    call /grade_pdf_assignment afterward with do_regrade=true if you want
+    to re-evaluate.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    drive_file_id: str
+    student_ids: List[str]    # emails to attribute the submission to
+
+class ReassignPdfSubmissionResponse(BaseModel):
+    drive_file_id: str
+    old_student_ids: List[str]
+    new_student_ids: List[str]
+    auto_added_students: List[str]   # emails that didn't exist on the course and were auto-added
+    cleared_placeholders: List[str]  # placeholder ids whose mirror docs were deleted
+
+
+class DebugDriveAccessRequest(BaseModel):
+    """Body for POST /debug_drive_access — diagnose Drive access without ingesting.
+
+    The course identifiers are required so we can apply the same
+    instructor-only authorization as the real ingest path.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    drive_url: str
+
+class DebugDriveAccessResponse(BaseModel):
+    ok: bool
+    kind: str  # "folder" or "file"
+    sa_email: str
+    drive_id: str
+    # On success:
+    items_found: int = 0
+    sample_names: List[str] = []
+    file_metadata: Dict[str, Any] | None = None
+    # On failure:
+    error_type: str | None = None
+    error_status: int | None = None
+    error_reason: str | None = None
+    error_message: str | None = None
+    hint: str | None = None
+
+
+class UploadPdfSubmissionResponse(BaseModel):
+    """Returned by POST /upload_pdf_submission.
+
+    Mirrors the per-file shape of IngestedPdfRecord but without the
+    ``placeholder_student_ids`` field — the manual-upload path doesn't
+    create placeholders since the instructor specifies emails directly.
+    """
+    drive_file_id: str
+    filename: str
+    gcs_uri: str
+    student_ids: List[str]
+    auto_added_students: List[str]
+
+
+class IngestPdfSubmissionsRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    drive_folder_url: str
+
+class IngestedPdfRecord(BaseModel):
+    drive_file_id: str
+    filename: str
+    authors: List[str]
+    student_ids: List[str]
+    placeholder_student_ids: List[str]
+    gcs_uri: str
+
+class SkippedPdfRecord(BaseModel):
+    drive_file_id: str
+    filename: str
+    reason: str
+
+class FailedPdfRecord(BaseModel):
+    drive_file_id: str | None = None
+    filename: str | None = None
+    error: str
+
+class IngestPdfSubmissionsResponse(BaseModel):
+    ingested: List[IngestedPdfRecord] = []
+    skipped: List[SkippedPdfRecord] = []
+    failed: List[FailedPdfRecord] = []
+
+
+class GradePdfAssignmentRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    do_regrade: bool = False
+
+
+class RosterRowError(BaseModel):
+    row_number: int
+    raw: Dict[str, Any]
+    reason: str
+
+class PlaceholderRosterMatch(BaseModel):
+    placeholder_student_id: str
+    placeholder_name: str
+    matched_email: str
+    matched_name: str
+
+class UploadStudentRosterResponse(BaseModel):
+    added: List[str] = []
+    updated: List[str] = []
+    skipped: List[RosterRowError] = []
+    # Placeholders (@pending.local) whose names fuzzy-match a roster entry.
+    # Detection only — no auto-merge in this version.
+    matching_placeholders: List[PlaceholderRosterMatch] = []
+
+
+class GradeAssignmentRequest(BaseModel):
+    """Unified grade-an-assignment request.
+
+    Server dispatches to the PDF or Colab path based on assignment_type
+    on the rubric doc. ``student_id`` is only used by the Colab path
+    (PDF mode grades every ingested submission).
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    student_id: str = "All"
+    do_regrade: bool = False
+
+
+class RegradePdfSubmissionRequest(BaseModel):
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    student_id: str
+    do_regrade: bool = True
+    student_contends: str = ""
+
+class RegradePdfSubmissionResponse(BaseModel):
+    response: str
+    marks: float
 
 class GradeNotebookRequest(BaseModel):
     student_id: str  # specific student email or "All" to grade all students
@@ -199,6 +416,11 @@ class UpdateCourseConfigRequest(BaseModel):
     isactive_tutor: Optional[bool] = None
     student_rate_limit: Optional[int] = None
     student_rate_limit_window: Optional[int] = None
+    # Filled into the agents' <<course_name>> / <<course_topics>> placeholders.
+    # Updating either invalidates the runner cache so the change is picked up
+    # without restarting the server.
+    course_name: Optional[str] = None
+    course_topics: Optional[str] = None
 
     @field_validator('student_rate_limit')
     @classmethod
@@ -218,6 +440,52 @@ class UpdateCourseConfigRequest(BaseModel):
 
 class UpdateCourseConfigResponse(BaseModel):
     updated: Dict[str, Any]
+
+
+class UpdateCoursePromptRequest(BaseModel):
+    """Set or clear a per-course prompt override for one agent.
+
+    ``agent_type`` must be one of ``"instructor"``, ``"student"``,
+    ``"scoring_qa"``, ``"scoring_report"``. An empty / null ``prompt``
+    clears the override, restoring the default template from agent.py.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    agent_type: str
+    prompt: str | None = None
+
+    @field_validator('agent_type')
+    @classmethod
+    def validate_agent_type(cls, v):
+        allowed = {"instructor", "student", "scoring_qa", "scoring_report"}
+        if v not in allowed:
+            raise ValueError(f"agent_type must be one of {sorted(allowed)}; got {v!r}")
+        return v
+
+
+class UpdateCoursePromptResponse(BaseModel):
+    agent_type: str
+    is_now_default: bool
+
+
+class CoursePromptResponse(BaseModel):
+    """Returned by GET /course_prompt.
+
+    ``prompt`` is the *effective* prompt the agent will use right now —
+    the override if one is set, otherwise the default template formatted
+    with the course's ``course_name`` and ``course_topics``. ``is_default``
+    is True iff there is no override. ``default_template`` is the raw
+    template (with the unresolved ``<<course_name>>`` /
+    ``<<course_topics>>`` placeholders) — useful for the dashboard's
+    "reset to default" button.
+    """
+    agent_type: str
+    prompt: str
+    is_default: bool
+    default_template: str
+    course_name: str
+    course_topics: str
 
 class UpdateGlobalConfigRequest(BaseModel):
     semaphore_limit: Optional[int] = None
