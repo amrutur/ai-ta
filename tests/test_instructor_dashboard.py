@@ -178,3 +178,39 @@ class TestMyCourses:
             assert ids == ["a", "z"]
         finally:
             _clear_courses(handles)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard at /, admin moved to /admin
+# ---------------------------------------------------------------------------
+
+
+class TestRouting:
+    def test_root_redirects_to_login_when_unauthenticated(self, client):
+        resp = client.get("/", follow_redirects=False)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/login?next=/"
+
+    def test_root_serves_dashboard_when_authenticated(self, client):
+        resp = client.get("/", headers=_auth_header("prof@x.com"))
+        assert resp.status_code == 200
+        # Sentinel strings present in the dashboard HTML
+        assert "AI-TA Instructor Dashboard" in resp.text
+        assert "/my_courses" in resp.text  # the page calls this endpoint client-side
+        assert "course-select" in resp.text
+
+    def test_admin_login_page_at_admin(self, client):
+        resp = client.get("/admin")
+        assert resp.status_code == 200
+        assert "Admin Login" in resp.text
+        # Should clearly point instructors to the dashboard
+        assert "dashboard" in resp.text.lower()
+
+    def test_login_accepts_safe_next_param(self, client):
+        # /login starts the OAuth flow but should accept a safe ?next= for
+        # post-login redirection. We don't follow through to OAuth here; we
+        # just verify the handler accepts the param and returns a 200 HTML
+        # redirect page (the existing behavior).
+        resp = client.get("/login?next=/", follow_redirects=False)
+        assert resp.status_code == 200
+        assert "Redirecting to Google" in resp.text

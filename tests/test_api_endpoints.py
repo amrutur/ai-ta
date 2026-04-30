@@ -54,8 +54,14 @@ def _admin_header():
 # ---------------------------------------------------------------------------
 
 class TestUnauthenticated:
-    def test_root_returns_html(self, client):
-        resp = client.get("/")
+    def test_root_redirects_unauthenticated_to_login(self, client):
+        # / now serves the instructor dashboard and redirects to /login when not signed in.
+        resp = client.get("/", follow_redirects=False)
+        assert resp.status_code == 302
+
+    def test_admin_login_page(self, client):
+        # The previous admin login HTML moved from / to /admin.
+        resp = client.get("/admin")
         assert resp.status_code == 200
         assert "Login" in resp.text
 
