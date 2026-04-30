@@ -68,6 +68,7 @@ from models import (
     IngestPdfSubmissionsRequest, IngestPdfSubmissionsResponse,
     IngestedPdfRecord, SkippedPdfRecord, FailedPdfRecord,
     GradePdfAssignmentRequest,
+    GradeAssignmentRequest,
     RegradePdfSubmissionRequest, RegradePdfSubmissionResponse,
 )
 from auth import (
@@ -2376,6 +2377,54 @@ async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: R
             yield json.dumps({"type": "error", "detail": f"An internal error occurred: {e}"}) + "\n"
 
     return StreamingResponse(_generate(), media_type="application/x-ndjson")
+
+
+@app.post("/grade_assignment")
+async def grade_assignment(query_body: GradeAssignmentRequest, request: Request):
+    """Unified grade endpoint — dispatches to PDF or Colab path by assignment_type.
+
+    Looks up the rubric for ``notebook_id`` in the course cache and routes
+    to /grade_pdf_assignment (multimodal scoring of every ingested PDF) or
+    /grade_notebook (per-question scoring for one or all enrolled students).
+
+    The unified body always includes ``student_id`` (defaults to "All");
+    PDF mode ignores it because each PDF already has its student_ids
+    attached. Returns the same ndjson stream as the underlying endpoint.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can grade assignments.")
+
+    rubric = courses[course_handle].get(query_body.notebook_id)
+    if not rubric:
+        raise HTTPException(status_code=404, detail=f"No rubric for assignment '{query_body.notebook_id}'.")
+
+    # Default to notebook mode for legacy rubrics that predate assignment_type.
+    assignment_type = rubric.get('assignment_type', 'notebook')
+    if assignment_type == 'pdf':
+        pdf_req = GradePdfAssignmentRequest(
+            institution_id=query_body.institution_id,
+            term_id=query_body.term_id,
+            course_id=query_body.course_id,
+            notebook_id=query_body.notebook_id,
+            do_regrade=query_body.do_regrade,
+        )
+        return await grade_pdf_assignment(pdf_req, request)
+    else:
+        nb_req = GradeNotebookRequest(
+            student_id=query_body.student_id or "All",
+            notebook_id=query_body.notebook_id,
+            course_id=query_body.course_id,
+            term_id=query_body.term_id,
+            institution_id=query_body.institution_id,
+            do_regrade=query_body.do_regrade,
+        )
+        return await grade_notebook(nb_req, request)
 
 
 @app.post("/regrade_pdf_submission", response_model=RegradePdfSubmissionResponse)

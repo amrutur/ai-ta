@@ -475,6 +475,97 @@ class TestGradePdfAssignment:
 # ---------------------------------------------------------------------------
 
 
+class TestGradeAssignmentDispatch:
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/grade_assignment",
+            json={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                  "notebook_id": "lab1"},
+        )
+        assert resp.status_code == 401
+
+    def test_pdf_assignment_dispatches_to_pdf_path(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.grade_pdf_assignment", new_callable=AsyncMock) as mock_pdf, \
+                 patch("api_server.grade_notebook", new_callable=AsyncMock) as mock_nb:
+                mock_pdf.return_value = MagicMock()  # any return; dispatch is what we test
+                resp = client.post(
+                    "/grade_assignment",
+                    json={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                          "notebook_id": "lab1", "do_regrade": True},
+                    headers=_instructor_header(),
+                )
+            mock_pdf.assert_awaited_once()
+            mock_nb.assert_not_awaited()
+            # The PDF body forwarded is a GradePdfAssignmentRequest
+            forwarded = mock_pdf.call_args.args[0]
+            assert forwarded.notebook_id == "lab1"
+            assert forwarded.do_regrade is True
+        finally:
+            _teardown(ch)
+
+    def test_notebook_assignment_dispatches_to_notebook_path(self, client):
+        ch = _setup_notebook_course(course_id="cp260", nb_id="hw1")
+        try:
+            with patch("api_server.grade_pdf_assignment", new_callable=AsyncMock) as mock_pdf, \
+                 patch("api_server.grade_notebook", new_callable=AsyncMock) as mock_nb:
+                mock_nb.return_value = MagicMock()
+                resp = client.post(
+                    "/grade_assignment",
+                    json={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                          "notebook_id": "hw1", "student_id": "alice@x.com", "do_regrade": False},
+                    headers=_instructor_header(),
+                )
+            mock_pdf.assert_not_awaited()
+            mock_nb.assert_awaited_once()
+            forwarded = mock_nb.call_args.args[0]
+            assert forwarded.notebook_id == "hw1"
+            assert forwarded.student_id == "alice@x.com"
+        finally:
+            _teardown(ch)
+
+    def test_legacy_rubric_without_assignment_type_treated_as_notebook(self, client):
+        # Old courses pre-date the assignment_type discriminator. They should
+        # still grade via the notebook path.
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "legacy")
+        courses[ch] = {
+            "instructor_gmail": "instructor@test.com",
+            "hw1": {"max_marks": 100.0},  # no assignment_type
+        }
+        try:
+            with patch("api_server.grade_pdf_assignment", new_callable=AsyncMock) as mock_pdf, \
+                 patch("api_server.grade_notebook", new_callable=AsyncMock) as mock_nb:
+                client.post(
+                    "/grade_assignment",
+                    json={"institution_id": "iisc", "term_id": "2025-26", "course_id": "legacy",
+                          "notebook_id": "hw1"},
+                    headers=_instructor_header(),
+                )
+            mock_pdf.assert_not_awaited()
+            mock_nb.assert_awaited_once()
+        finally:
+            courses.pop(ch, None)
+
+    def test_missing_rubric_404(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}  # no notebook
+        try:
+            resp = client.post(
+                "/grade_assignment",
+                json={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                      "notebook_id": "lab_does_not_exist"},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 404
+        finally:
+            courses.pop(ch, None)
+
+
 class TestRegradePdfSubmission:
     def test_requires_auth(self, client):
         resp = client.post(

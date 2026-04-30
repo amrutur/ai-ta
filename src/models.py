@@ -204,6 +204,21 @@ class GradePdfAssignmentRequest(BaseModel):
     do_regrade: bool = False
 
 
+class GradeAssignmentRequest(BaseModel):
+    """Unified grade-an-assignment request.
+
+    Server dispatches to the PDF or Colab path based on assignment_type
+    on the rubric doc. ``student_id`` is only used by the Colab path
+    (PDF mode grades every ingested submission).
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    student_id: str = "All"
+    do_regrade: bool = False
+
+
 class RegradePdfSubmissionRequest(BaseModel):
     institution_id: str
     term_id: str

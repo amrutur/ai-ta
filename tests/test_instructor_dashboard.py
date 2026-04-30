@@ -233,10 +233,15 @@ class TestDashboardServiceRegistry:
             "/upload_rubric_file",
             "/upload_rubric_link",
             "/ingest_pdf_submissions",
-            "/grade_pdf_assignment",
             "/regrade_pdf_submission",
         ]:
             assert url in resp.text, f"Dashboard should expose {url}"
+
+    def test_includes_unified_grade_endpoint(self, client):
+        # The dashboard uses one /grade_assignment button that dispatches by
+        # assignment_type server-side, instead of separate PDF / Colab buttons.
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        assert "/grade_assignment" in resp.text
 
     def test_includes_grade_management_endpoints(self, client):
         resp = client.get("/", headers=_auth_header("admin@test.com"))
@@ -244,7 +249,6 @@ class TestDashboardServiceRegistry:
             "/fetch_marks_list",
             "/fetch_grader_response",
             "/notify_student_grades",
-            "/grade_notebook",
             "/regrade_answer",
         ]:
             assert url in resp.text

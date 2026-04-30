@@ -173,62 +173,51 @@ const SERVICES = [
     fields: [],
   },
 
-  // --- PDF Assignments ----------------------------------------------------
+  // --- PDF Submissions (intake only) -------------------------------------
   {
     id: 'pdf_ingest',
-    section: 'PDF assignments',
-    label: 'Ingest PDF submissions',
-    desc: 'Reads PDFs from a shared Drive folder, copies each to GCS, extracts authors, and creates submission records. Idempotent.',
+    section: 'PDF submissions',
+    label: 'Ingest PDF submissions from Drive',
+    desc: 'Reads PDFs from a shared Drive folder, copies each to GCS, extracts authors, and creates submission records. Idempotent — safe to re-run.',
     method: 'POST', url: '/ingest_pdf_submissions', encoding: 'json',
     fields: [
-      {name: 'notebook_id', label: 'Notebook / assignment ID', type: 'text', required: true},
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
       {name: 'drive_folder_url', label: 'Drive folder URL', type: 'text', required: true,
        hint: 'Folder must be shared (Viewer) with the platform service account.'},
     ],
   },
+
+  // --- Grading -----------------------------------------------------------
   {
-    id: 'pdf_grade',
-    section: 'PDF assignments',
-    label: 'Grade PDF assignment',
-    desc: 'Run the scoring agent on every ingested PDF. Streams progress.',
-    method: 'POST', url: '/grade_pdf_assignment', encoding: 'json', streaming: true,
+    id: 'grade_assignment',
+    section: 'Grading',
+    label: 'Grade assignment',
+    desc: 'Run the scoring agent on every submission for an assignment. Works for both PDF and Colab assignments — the server dispatches based on the rubric type. Streams progress.',
+    method: 'POST', url: '/grade_assignment', encoding: 'json', streaming: true,
     fields: [
-      {name: 'notebook_id', label: 'Notebook / assignment ID', type: 'text', required: true},
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
+      {name: 'student_id', label: 'Student email or "All" (Colab assignments only — ignored for PDF)', type: 'text', value: 'All'},
       {name: 'do_regrade', label: 'Re-grade already-graded submissions', type: 'checkbox'},
     ],
   },
   {
     id: 'pdf_regrade_one',
-    section: 'PDF assignments',
+    section: 'Grading',
     label: 'Regrade one PDF submission',
     desc: 'Re-grade a single student\'s PDF, optionally including their contention text.',
     method: 'POST', url: '/regrade_pdf_submission', encoding: 'json',
     fields: [
-      {name: 'notebook_id', label: 'Notebook / assignment ID', type: 'text', required: true},
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
       {name: 'student_id', label: 'Student email', type: 'text', required: true},
       {name: 'student_contends', label: 'Student contention (optional)', type: 'textarea'},
       {name: 'do_regrade', label: 'Allow regrading even if already graded', type: 'checkbox', value: true},
     ],
   },
-
-  // --- Colab Assignments --------------------------------------------------
-  {
-    id: 'nb_grade',
-    section: 'Colab assignments',
-    label: 'Batch grade Colab notebook',
-    desc: 'Grade all students (or one) for an existing Colab-notebook rubric. Streams progress.',
-    method: 'POST', url: '/grade_notebook', encoding: 'json', streaming: true,
-    fields: [
-      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
-      {name: 'student_id', label: 'Student email or "All"', type: 'text', required: true, value: 'All'},
-      {name: 'do_regrade', label: 'Re-grade already-graded students', type: 'checkbox'},
-    ],
-  },
   {
     id: 'nb_regrade_q',
-    section: 'Colab assignments',
-    label: 'Regrade one question',
-    desc: 'Re-grade a single question for one student, optionally including contention.',
+    section: 'Grading',
+    label: 'Regrade one question (Colab)',
+    desc: 'Re-grade a single question for one student in a Colab notebook assignment, optionally including contention.',
     method: 'POST', url: '/regrade_answer', encoding: 'json',
     fields: [
       {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
