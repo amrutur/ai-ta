@@ -109,17 +109,57 @@ async def extract_authors_with_gemini(
     # mock out vertexai. agent.py calls vertexai.init() at import time.
     from vertexai.generative_models import GenerativeModel
 
+    # Few-shot prompt covering the layouts we see in practice: a separate
+    # author line under the title, "by ..." prose, "group members: ..." /
+    # "team members: ..." inlined with the title (common for IISc / many
+    # Indian university lab reports), explicit "Authors:" lists with roll
+    # numbers, and prose like "submitted by". The model needs to look
+    # everywhere on the cover page, not just the line below the title.
     prompt = (
-        "Extract the author names from this academic report or assignment "
-        "cover page. Authors are usually listed below the title and may "
-        "include affiliations, roll numbers, or email addresses — return "
-        "ONLY the personal names, stripped of those extras. Return a JSON "
-        "object with a single key 'authors' whose value is an array of "
-        "full names (strings). If no authors can be identified, return "
-        '{"authors": []}.'
-        "\n\n---\n"
-        f"{pdf_text[:MAX_AUTHOR_PROMPT_CHARS]}"
-        "\n---"
+        "Extract the personal names of the report's authors / submitters / "
+        "group members from the cover-page text below.\n"
+        "\n"
+        "Names may appear in any of these places — search for all of them:\n"
+        "  - On a separate line below the title\n"
+        "  - Inline with or appended to the title, after a label like "
+        "    \"group members:\", \"team members:\", \"by:\", \"submitted "
+        "    by:\", \"authors:\", \"prepared by:\"\n"
+        "  - Embedded in a single sentence (e.g. \"...: calibration group "
+        "    members: Alice Smith, Bob Jones\")\n"
+        "  - In an enumerated list (e.g. \"1. Alice (roll 123) 2. Bob (roll 456)\")\n"
+        "\n"
+        "Strip from each extracted name:\n"
+        "  - Roll numbers, student IDs, registration numbers\n"
+        "  - Email addresses\n"
+        "  - Affiliations (department / institute / lab names)\n"
+        "  - Titles (Mr., Ms., Dr., Prof.) and honorifics\n"
+        "  - List markers (\"1.\", \"2.\", bullets, hyphens)\n"
+        "Return ONLY the personal names — first name + last name (and middle "
+        "names if present).\n"
+        "\n"
+        "Output a JSON object with a single key \"authors\" whose value is an "
+        "array of full names (strings). If — after looking everywhere on the "
+        "cover page — no plausible author names can be identified, return "
+        '{"authors": []}.\n'
+        "\n"
+        "Examples:\n"
+        "  IN:  \"Project Report\\nBy Alice Smith and Bob Jones\\nDept of CS\"\n"
+        '  OUT: {"authors": ["Alice Smith", "Bob Jones"]}\n'
+        "\n"
+        "  IN:  \"Hydraulically coupled blood pressure recording system: "
+        "calibration  group members: Abigail Smith, Charlie Brown, Dana Lee\"\n"
+        '  OUT: {"authors": ["Abigail Smith", "Charlie Brown", "Dana Lee"]}\n'
+        "\n"
+        "  IN:  \"Lab 3 — Buffer Overflow\\nAuthors:\\n1. Alice (CS-2024-001)\\n2. Bob (CS-2024-002)\"\n"
+        '  OUT: {"authors": ["Alice", "Bob"]}\n'
+        "\n"
+        "  IN:  \"Final Project Report  Submitted by Jane Doe\"\n"
+        '  OUT: {"authors": ["Jane Doe"]}\n'
+        "\n"
+        "Now extract the authors from this cover page:\n"
+        "---\n"
+        f"{pdf_text[:MAX_AUTHOR_PROMPT_CHARS]}\n"
+        "---"
     )
     debug_info["prompt_chars"] = len(prompt)
 

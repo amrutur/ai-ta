@@ -169,6 +169,58 @@ class TestExtractAuthorsWithGemini:
 
         assert await extract_authors_with_gemini("Some text") == []
 
+    @pytest.mark.asyncio
+    @patch("vertexai.generative_models.GenerativeModel")
+    async def test_prompt_covers_inline_group_members_format(self, mock_model_cls):
+        # Smoke test: the prompt explicitly mentions "group members:" /
+        # "team members:" / inline-with-title patterns so the LLM doesn't
+        # ignore them. We verify that prompt content reaches generate_content.
+        instance = MagicMock()
+        response = MagicMock()
+        response.text = '{"authors": ["Abigail Smith", "Charlie Brown", "Dana Lee"]}'
+        instance.generate_content = MagicMock(return_value=response)
+        mock_model_cls.return_value = instance
+
+        cover_text = (
+            "Hydraulically coupled blood pressure recording system: "
+            "calibration  group members: Abigail Smith, Charlie Brown, Dana Lee\n"
+            "May 2026"
+        )
+        result = await extract_authors_with_gemini(cover_text)
+        assert result == ["Abigail Smith", "Charlie Brown", "Dana Lee"]
+
+        sent_prompt = instance.generate_content.call_args.args[0]
+        assert "group members:" in sent_prompt.lower()
+        assert "by:" in sent_prompt.lower() or "submitted by:" in sent_prompt.lower()
+        # The few-shot example covering this exact pattern is included so the
+        # LLM doesn't "miss" inline-with-title author lists.
+        assert "Abigail Smith" in sent_prompt or "Hydraulically coupled" in sent_prompt
+
+    @pytest.mark.asyncio
+    @patch("vertexai.generative_models.GenerativeModel")
+    async def test_debug_mode_returns_tuple_with_diagnostics(self, mock_model_cls):
+        instance = MagicMock()
+        response = MagicMock()
+        response.text = '{"authors": ["Alice"]}'
+        instance.generate_content = MagicMock(return_value=response)
+        mock_model_cls.return_value = instance
+
+        authors, debug_info = await extract_authors_with_gemini("text", debug=True)
+        assert authors == ["Alice"]
+        assert debug_info['model'].startswith('gemini')
+        assert debug_info['prompt_chars'] > 0
+        assert debug_info['llm_raw_response'] == '{"authors": ["Alice"]}'
+        assert debug_info['parsed'] == {"authors": ["Alice"]}
+        assert debug_info['error'] is None
+
+    @pytest.mark.asyncio
+    async def test_debug_mode_on_empty_input_explains_why(self):
+        # Image-only PDFs surface as empty extracted text; the diagnostic
+        # bag should say so explicitly so the dashboard hint is actionable.
+        authors, debug_info = await extract_authors_with_gemini("", debug=True)
+        assert authors == []
+        assert debug_info['error'] and "no text" in debug_info['error'].lower()
+
 
 class TestParseRosterCsv:
     def test_basic(self):
