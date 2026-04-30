@@ -873,6 +873,21 @@ async def add_placeholder_student(db, course_handle: str, student_id: str, name:
         raise HTTPException(status_code=500, detail="Failed to create placeholder student.")
 
 
+async def get_student_pdf_mirror(
+    db, course_handle: str, student_id: str, notebook_id: str,
+) -> dict | None:
+    """Return the per-student PDF submission mirror doc, or None if missing."""
+    try:
+        ref = (db.collection('courses').document(course_handle)
+               .collection('Students').document(student_id)
+               .collection('Notebooks').document(notebook_id))
+        doc = await ref.get()
+        return doc.to_dict() if doc.exists else None
+    except Exception as e:
+        logging.error(f"Error fetching mirror doc for {student_id}/{notebook_id}: {e}")
+        return None
+
+
 async def get_student_directory(db, course_handle: str) -> dict[str, str]:
     """Return ``{student_id: name}`` for every enrolled student in the course.
 

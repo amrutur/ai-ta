@@ -14,6 +14,7 @@ from database import (
     add_placeholder_student,
     get_pdf_submission,
     get_student_directory,
+    get_student_pdf_mirror,
     list_pdf_submissions,
     save_pdf_rubric,
     update_pdf_submission_grade,
@@ -368,6 +369,22 @@ class TestGetStudentDirectory:
             "bob@iisc.ac.in": "Bob",
             "noname@iisc.ac.in": "",
         }
+
+
+class TestGetStudentPdfMirror:
+    @pytest.mark.asyncio
+    async def test_returns_dict_when_exists(self):
+        snap = MagicMock(); snap.exists = True
+        snap.to_dict.return_value = {"drive_file_id": "X"}
+        db, _, _ = _make_db_with_doc(doc_get=AsyncMock(return_value=snap))
+        result = await get_student_pdf_mirror(db, "ch", "alice@x.com", "nb")
+        assert result == {"drive_file_id": "X"}
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_missing(self):
+        snap = MagicMock(); snap.exists = False
+        db, _, _ = _make_db_with_doc(doc_get=AsyncMock(return_value=snap))
+        assert await get_student_pdf_mirror(db, "ch", "alice@x.com", "nb") is None
 
 
 def test_subcollection_constant():

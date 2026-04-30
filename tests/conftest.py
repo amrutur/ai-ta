@@ -96,8 +96,11 @@ if "vertexai" not in sys.modules:
     _mock_vertexai = MagicMock()
     _mock_vertexai.generative_models = MagicMock()
     _mock_vertexai.generative_models.GenerativeModel = MagicMock
+    _mock_vertexai.language_models = MagicMock()
+    _mock_vertexai.language_models.TextEmbeddingModel = MagicMock
     sys.modules["vertexai"] = _mock_vertexai
     sys.modules["vertexai.generative_models"] = _mock_vertexai.generative_models
+    sys.modules["vertexai.language_models"] = _mock_vertexai.language_models
 
 
 # ---------------------------------------------------------------------------

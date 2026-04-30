@@ -46,7 +46,7 @@ from google_auth_oauthlib.flow import Flow
 from google.genai import types
 
 import config
-from agent_service import run_agent_and_get_response, score_question, evaluate, update_semaphore_limit, get_semaphore_limit, truncate_text, truncate_prompt, MAX_OUTPUT_CHARS, MAX_TOTAL_PROMPT_CHARS
+from agent_service import run_agent_and_get_response, score_question, score_pdf_submission, evaluate, update_semaphore_limit, get_semaphore_limit, truncate_text, truncate_prompt, MAX_OUTPUT_CHARS, MAX_TOTAL_PROMPT_CHARS
 
 from models import (
     QueryRequest, QueryResponse,
@@ -64,7 +64,11 @@ from models import (
     BuildCourseIndexRequest, BuildCourseIndexResponse,
     UpdateCourseConfigRequest, UpdateCourseConfigResponse,
     UpdateGlobalConfigRequest, UpdateGlobalConfigResponse,
-    ListCourseFilesRequest, ListCourseFilesResponse
+    ListCourseFilesRequest, ListCourseFilesResponse,
+    IngestPdfSubmissionsRequest, IngestPdfSubmissionsResponse,
+    IngestedPdfRecord, SkippedPdfRecord, FailedPdfRecord,
+    GradePdfAssignmentRequest,
+    RegradePdfSubmissionRequest, RegradePdfSubmissionResponse,
 )
 from auth import (
     create_jwt_token,
@@ -89,13 +93,32 @@ from database import (
     create_course,
     make_course_handle,
     save_rubric,
+    save_pdf_rubric,
     get_marks_list,
     get_course_data,
     load_course_info_from_db,
     load_notebooks_from_db,
-    load_default_values
+    load_default_values,
+    add_placeholder_student,
+    get_student_directory,
+    get_student_pdf_mirror,
+    get_pdf_submission,
+    list_pdf_submissions,
+    update_pdf_submission_grade,
+    upsert_pdf_submission,
 )
-from drive_utils import load_notebook_from_google_drive_sa
+from drive_utils import (
+    download_file_bytes_sa,
+    extract_folder_id_from_link,
+    list_pdfs_in_folder_sa,
+    load_notebook_from_google_drive_sa,
+)
+from pdf_utils import (
+    extract_authors_with_gemini,
+    extract_first_pages_text,
+    make_placeholder_student_id,
+    match_author_to_student,
+)
 from email_service import send_email
 from storage_utils import upload_blob, generate_signed_upload_url, list_blobs
 from rag import build_course_index, retrieve_context
@@ -1708,30 +1731,442 @@ async def upload_rubric_api(
     user = get_current_user(request)
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
     try:
-        user = get_current_user(request)
         user_gmail = user.get('email', '').lower()
         if not is_authorized(user_gmail, course_handle) :
             raise HTTPException(status_code=403, detail="User is not an instructor  for this course nor a platform admin. Is not allowed to upload rubric")
 
-        #Save the in the cache
-        courses[course_handle][query_body.notebook_id]={'context':query_body.context,
-                                             'questions':query_body.questions,
-                                             'max_marks': query_body.max_marks,
-                                             'answers':query_body.answers,
-                                             'outputs':query_body.outputs,
-                                             'isactive_eval': True}
-
-        #now save the rubric in the databse as well
-        await save_rubric(config.db, course_handle, query_body.notebook_id, query_body.max_marks, query_body.context, query_body.questions, query_body.answers, query_body.outputs)
-        await update_notebook_info(config.db, course_handle, query_body.notebook_id, 'isactive_eval', True)
+        if query_body.assignment_type == "pdf":
+            if not query_body.problem_statement or not query_body.rubric_text:
+                raise HTTPException(
+                    status_code=400,
+                    detail="PDF rubric requires both 'problem_statement' and 'rubric_text'."
+                )
+            courses[course_handle][query_body.notebook_id] = {
+                'assignment_type': 'pdf',
+                'max_marks': query_body.max_marks,
+                'problem_statement': query_body.problem_statement,
+                'rubric_text': query_body.rubric_text,
+                'sample_graded_response': query_body.sample_graded_response or '',
+                'isactive_eval': True,
+            }
+            await save_pdf_rubric(
+                config.db, course_handle, query_body.notebook_id,
+                query_body.max_marks, query_body.problem_statement,
+                query_body.rubric_text, query_body.sample_graded_response,
+            )
+        else:
+            if query_body.context is None or query_body.questions is None or query_body.answers is None or query_body.outputs is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Notebook rubric requires 'context', 'questions', 'answers', and 'outputs'."
+                )
+            courses[course_handle][query_body.notebook_id] = {
+                'context': query_body.context,
+                'questions': query_body.questions,
+                'max_marks': query_body.max_marks,
+                'answers': query_body.answers,
+                'outputs': query_body.outputs,
+                'isactive_eval': True,
+            }
+            await save_rubric(
+                config.db, course_handle, query_body.notebook_id,
+                query_body.max_marks, query_body.context, query_body.questions,
+                query_body.answers, query_body.outputs,
+            )
+            await update_notebook_info(config.db, course_handle, query_body.notebook_id, 'isactive_eval', True)
 
         return AddRubricResponse(
             response=f"Successfully added rubric '{query_body.notebook_id}' to course '{course_handle}'"
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("An exception occurred during add_rubric_api: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+# ==================== PDF Assignment Endpoints ====================
+
+# Hard cap on PDF size during ingest. Larger PDFs probably indicate scanned
+# documents or content we can't reasonably feed to the model; fail loudly
+# rather than silently degrade the grade.
+MAX_PDF_SIZE_BYTES = 50 * 1024 * 1024
+
+
+async def _resolve_pdf_authors(
+    course_handle: str,
+    drive_file_id: str,
+    pdf_bytes: bytes,
+    filename: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """Run author extraction and resolve names to enrolled-student IDs.
+
+    Returns ``(extracted_authors, student_ids, placeholder_ids)``. If the LLM
+    returns no authors, falls back to a single placeholder named after the
+    filename so the PDF still gets a submission record (instructor can fix
+    the attribution later).
+    """
+    cover_text = await asyncio.to_thread(extract_first_pages_text, pdf_bytes)
+    extracted = await extract_authors_with_gemini(cover_text)
+
+    if not extracted:
+        # Use the filename stem as the placeholder display name so the
+        # instructor can spot it in the Students subcollection.
+        stem = filename.rsplit('.', 1)[0] if filename else f"unknown-{drive_file_id[:8]}"
+        sid = make_placeholder_student_id(stem)
+        await add_placeholder_student(config.db, course_handle, sid, stem, drive_file_id)
+        return [], [sid], [sid]
+
+    student_directory = await get_student_directory(config.db, course_handle)
+
+    student_ids: list[str] = []
+    placeholders: list[str] = []
+    for name in extracted:
+        matched = match_author_to_student(name, student_directory)
+        if matched:
+            student_ids.append(matched)
+        else:
+            sid = make_placeholder_student_id(name)
+            await add_placeholder_student(config.db, course_handle, sid, name, drive_file_id)
+            student_ids.append(sid)
+            placeholders.append(sid)
+
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    deduped = [s for s in student_ids if not (s in seen or seen.add(s))]
+    return extracted, deduped, placeholders
+
+
+@app.post("/ingest_pdf_submissions", response_model=IngestPdfSubmissionsResponse)
+async def ingest_pdf_submissions(query_body: IngestPdfSubmissionsRequest, request: Request):
+    """Ingest PDF assignments from a shared Google Drive folder.
+
+    The Drive folder must be shared (read access) with the platform service
+    account. For each PDF in the folder we:
+      1. Skip if a submission with the same drive_file_id + drive_modified_time
+         already exists (idempotent re-runs).
+      2. Download the PDF, upload it to GCS, extract authors via Gemini, and
+         resolve each name to an enrolled student or a placeholder record.
+      3. Write a per-PDF tracking doc plus per-student mirror docs.
+
+    Only accessible to instructors / platform admins. Returns a structured
+    summary of ingested / skipped / failed files; grading is a separate step
+    via /grade_pdf_assignment.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors can ingest PDF submissions.")
+
+    rubric = courses[course_handle].get(query_body.notebook_id)
+    if not rubric:
+        raise HTTPException(status_code=404, detail=f"Notebook '{query_body.notebook_id}' has no rubric — upload a PDF rubric first.")
+    if rubric.get('assignment_type') != 'pdf':
+        raise HTTPException(status_code=400, detail=f"Notebook '{query_body.notebook_id}' is not configured for PDF assignments.")
+
+    folder_id = extract_folder_id_from_link(query_body.drive_folder_url)
+    if not folder_id:
+        raise HTTPException(status_code=400, detail="Could not parse Drive folder ID from the supplied URL.")
+
+    try:
+        files = await asyncio.to_thread(list_pdfs_in_folder_sa, config.firestore_cred_dict, folder_id)
+    except Exception as e:
+        logging.error(f"Failed to list Drive folder {folder_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not list folder. Ensure the folder is shared with the service account ({config.firestore_cred_dict.get('client_email')}).")
+
+    response = IngestPdfSubmissionsResponse()
+
+    for f in files:
+        drive_file_id = f.get('id')
+        filename = f.get('name', 'unknown.pdf')
+        modified_time = f.get('modifiedTime', '')
+        size_str = f.get('size') or '0'
+
+        try:
+            try:
+                size_bytes = int(size_str)
+            except (TypeError, ValueError):
+                size_bytes = 0
+            if size_bytes > MAX_PDF_SIZE_BYTES:
+                response.failed.append(FailedPdfRecord(
+                    drive_file_id=drive_file_id, filename=filename,
+                    error=f"File too large ({size_bytes} bytes; max {MAX_PDF_SIZE_BYTES}).",
+                ))
+                continue
+
+            existing = await get_pdf_submission(config.db, course_handle, query_body.notebook_id, drive_file_id)
+            if existing and existing.get('drive_modified_time') == modified_time:
+                response.skipped.append(SkippedPdfRecord(
+                    drive_file_id=drive_file_id, filename=filename,
+                    reason="Already ingested at this modified_time.",
+                ))
+                continue
+
+            pdf_bytes = await asyncio.to_thread(download_file_bytes_sa, config.firestore_cred_dict, drive_file_id)
+            if pdf_bytes is None:
+                response.failed.append(FailedPdfRecord(
+                    drive_file_id=drive_file_id, filename=filename,
+                    error="Drive download failed (see server logs).",
+                ))
+                continue
+
+            destination_path = f"{course_handle}/submissions/{query_body.notebook_id}/{drive_file_id}.pdf"
+            gcs_uri = await asyncio.to_thread(
+                upload_blob, config.bucket_name, destination_path, pdf_bytes, "application/pdf",
+            )
+
+            extracted, student_ids, placeholders = await _resolve_pdf_authors(
+                course_handle, drive_file_id, pdf_bytes, filename,
+            )
+
+            await upsert_pdf_submission(
+                config.db, course_handle, query_body.notebook_id,
+                drive_file_id=drive_file_id,
+                drive_modified_time=modified_time,
+                gcs_uri=gcs_uri,
+                original_filename=filename,
+                extracted_authors=extracted,
+                student_ids=student_ids,
+            )
+
+            response.ingested.append(IngestedPdfRecord(
+                drive_file_id=drive_file_id,
+                filename=filename,
+                authors=extracted,
+                student_ids=student_ids,
+                placeholder_student_ids=placeholders,
+                gcs_uri=gcs_uri,
+            ))
+            logging.info(
+                f"Ingested PDF '{filename}' (drive_file_id={drive_file_id}) for "
+                f"{len(student_ids)} student(s), {len(placeholders)} placeholder(s)."
+            )
+
+        except Exception as e:
+            logging.error(f"Failed to ingest PDF '{filename}': {e}")
+            traceback.print_exc()
+            response.failed.append(FailedPdfRecord(
+                drive_file_id=drive_file_id, filename=filename, error=str(e),
+            ))
+
+    logging.info(
+        f"PDF ingest for {course_handle}/{query_body.notebook_id}: "
+        f"{len(response.ingested)} ingested, {len(response.skipped)} skipped, "
+        f"{len(response.failed)} failed."
+    )
+    return response
+
+
+@app.post("/grade_pdf_assignment")
+async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: Request):
+    """Grade every ingested PDF submission for a notebook.
+
+    For each per-PDF tracking doc:
+      - Skip if already graded (graded_at >= drive_modified_time) unless do_regrade.
+      - Run the scoring agent with the PDF (via gs:// URI) plus rubric/sample/RAG.
+      - Write the grade to the tracking doc and to every co-author's mirror doc.
+
+    Streams ndjson progress lines, mirroring /grade_notebook.
+    Only accessible to instructors / platform admins.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors can grade PDF assignments.")
+
+    rubric = courses[course_handle].get(query_body.notebook_id)
+    if not rubric:
+        raise HTTPException(status_code=404, detail=f"Notebook '{query_body.notebook_id}' has no rubric.")
+    if rubric.get('assignment_type') != 'pdf':
+        raise HTTPException(status_code=400, detail=f"Notebook '{query_body.notebook_id}' is not a PDF assignment.")
+
+    problem_statement = rubric.get('problem_statement', '')
+    rubric_text = rubric.get('rubric_text', '')
+    sample_graded_response = rubric.get('sample_graded_response', '') or ''
+    max_marks_total = rubric.get('max_marks', 0.0)
+
+    submissions = await list_pdf_submissions(config.db, course_handle, query_body.notebook_id)
+    if not submissions:
+        raise HTTPException(status_code=404, detail=f"No PDF submissions ingested for notebook '{query_body.notebook_id}'.")
+
+    runner = config.get_runner("scoring", courses, course_handle)
+    rag_material = await retrieve_context(course_handle, problem_statement) if problem_statement else ""
+
+    async def _grade_one(sub: dict):
+        drive_file_id = sub.get('drive_file_id')
+        gcs_uri = sub.get('gcs_uri')
+        student_ids = sub.get('student_ids') or []
+        modified_time = sub.get('drive_modified_time') or ''
+        graded_at = sub.get('graded_at')
+
+        if not query_body.do_regrade and graded_at is not None and modified_time and \
+           str(graded_at) >= modified_time:
+            return drive_file_id, "skipped", None, None
+
+        # Use the first student as the session/user_id so retries dedupe naturally.
+        user_id = student_ids[0] if student_ids else f"unknown-{drive_file_id}"
+
+        try:
+            marks, response_text = await score_pdf_submission(
+                problem_statement, rubric_text, sample_graded_response,
+                gcs_uri, runner,
+                config.get_session_service("scoring", course_handle),
+                user_id, course_material=rag_material,
+            )
+        except Exception as e:
+            logging.error(f"Failed scoring PDF {drive_file_id}: {e}")
+            return drive_file_id, "failed", None, str(e)
+
+        grader_response = {"overall": {"marks": marks, "response": response_text}}
+        await update_pdf_submission_grade(
+            config.db, course_handle, query_body.notebook_id,
+            drive_file_id=drive_file_id,
+            student_ids=student_ids,
+            total_marks=marks,
+            max_marks=max_marks_total,
+            grader_response=grader_response,
+        )
+        return drive_file_id, "graded", marks, None
+
+    tasks = [asyncio.create_task(_grade_one(s)) for s in submissions]
+
+    async def _generate():
+        try:
+            yield json.dumps({"type": "progress", "message": f"Grading {len(submissions)} PDF submission(s) for '{query_body.notebook_id}'."}) + "\n"
+
+            graded = skipped = failed = 0
+            results = []
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    yield json.dumps({"type": "heartbeat"}) + "\n"
+                    continue
+                for t in done:
+                    try:
+                        drive_file_id, status, marks, err = t.result()
+                    except Exception as e:
+                        failed += 1
+                        yield json.dumps({"type": "progress", "message": f"Task error: {e}"}) + "\n"
+                        continue
+                    if status == "graded":
+                        graded += 1
+                        results.append({"drive_file_id": drive_file_id, "marks": marks, "max_marks": max_marks_total})
+                        yield json.dumps({"type": "progress", "message": f"Graded {drive_file_id}: {marks}/{max_marks_total}"}) + "\n"
+                    elif status == "skipped":
+                        skipped += 1
+                        yield json.dumps({"type": "progress", "message": f"Skipped {drive_file_id} (already graded)."}) + "\n"
+                    else:
+                        failed += 1
+                        yield json.dumps({"type": "progress", "message": f"Failed {drive_file_id}: {err}"}) + "\n"
+
+            summary = f"PDF grading done. {graded} graded, {skipped} skipped, {failed} failed."
+            logging.info(summary)
+            yield json.dumps({"type": "response", "response": summary, "results": results}) + "\n"
+
+        except asyncio.CancelledError:
+            logging.warning("grade_pdf_assignment stream cancelled; tasks continue in background.")
+            return
+        except Exception as e:
+            logging.error("Error in grade_pdf_assignment stream: %s", e)
+            traceback.print_exc()
+            yield json.dumps({"type": "error", "detail": f"An internal error occurred: {e}"}) + "\n"
+
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
+
+
+@app.post("/regrade_pdf_submission", response_model=RegradePdfSubmissionResponse)
+async def regrade_pdf_submission(query_body: RegradePdfSubmissionRequest, request: Request):
+    """Regrade a single student's PDF submission, optionally with student contention.
+
+    Looks up the student's mirror doc to get the drive_file_id, then re-runs the
+    scoring agent with the previous response and contention text appended to the
+    prompt. Writes the new grade to the tracking doc + every co-author's mirror.
+    Only accessible to instructors / platform admins.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors can regrade PDF submissions.")
+
+    rubric = courses[course_handle].get(query_body.notebook_id)
+    if not rubric or rubric.get('assignment_type') != 'pdf':
+        raise HTTPException(status_code=404, detail=f"Notebook '{query_body.notebook_id}' is not a PDF assignment.")
+
+    # Pull the student's mirror doc to discover drive_file_id + co-authors.
+    mirror = await get_student_pdf_mirror(
+        config.db, course_handle, query_body.student_id, query_body.notebook_id,
+    )
+    if mirror is None:
+        raise HTTPException(status_code=404, detail=f"No PDF submission for student '{query_body.student_id}' on notebook '{query_body.notebook_id}'.")
+    drive_file_id = mirror.get('drive_file_id')
+    if not drive_file_id:
+        raise HTTPException(status_code=404, detail="Student record has no drive_file_id — was this PDF ever ingested?")
+
+    tracking = await get_pdf_submission(config.db, course_handle, query_body.notebook_id, drive_file_id)
+    if not tracking:
+        raise HTTPException(status_code=404, detail="Per-PDF tracking record missing.")
+
+    if not query_body.do_regrade and tracking.get('graded_at') is not None:
+        raise HTTPException(status_code=409, detail="Already graded. Set do_regrade=true to re-grade.")
+
+    problem_statement = rubric.get('problem_statement', '')
+    rubric_text = rubric.get('rubric_text', '')
+    sample_graded_response = rubric.get('sample_graded_response', '') or ''
+    max_marks_total = rubric.get('max_marks', 0.0)
+    gcs_uri = tracking.get('gcs_uri')
+    student_ids = tracking.get('student_ids') or [query_body.student_id]
+
+    previous_grading = ""
+    prev = tracking.get('grader_response', {}) or {}
+    overall = prev.get('overall', {}) if isinstance(prev, dict) else {}
+    if overall.get('response'):
+        previous_grading = overall['response']
+
+    runner = config.get_runner("scoring", courses, course_handle)
+    rag_material = await retrieve_context(course_handle, problem_statement) if problem_statement else ""
+
+    marks, response_text = await score_pdf_submission(
+        problem_statement, rubric_text, sample_graded_response,
+        gcs_uri, runner,
+        config.get_session_service("scoring", course_handle),
+        query_body.student_id, course_material=rag_material,
+        student_contention=query_body.student_contends,
+        previous_grading=previous_grading,
+    )
+
+    # Stash the new and previous response so the audit trail is preserved.
+    combined_response = f"{{regraded response}}\n{response_text}"
+    if query_body.student_contends:
+        combined_response += f"\n\n{{student's contention}}\n{query_body.student_contends}"
+    if previous_grading:
+        prev_marks = overall.get('marks', 0.0)
+        combined_response += f"\n\n[previous marks]={prev_marks}\n[previous response]={previous_grading}"
+
+    grader_response = {"overall": {"marks": marks, "response": combined_response}}
+    await update_pdf_submission_grade(
+        config.db, course_handle, query_body.notebook_id,
+        drive_file_id=drive_file_id,
+        student_ids=student_ids,
+        total_marks=marks,
+        max_marks=max_marks_total,
+        grader_response=grader_response,
+    )
+
+    return RegradePdfSubmissionResponse(response=response_text, marks=marks)
 
 # ==================== Course Materials Upload ====================
 
