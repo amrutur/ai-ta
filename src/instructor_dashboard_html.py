@@ -345,13 +345,53 @@ const SERVICES = [
     method: 'POST', url: '/rate_limit_status', encoding: 'json',
     fields: [],
   },
+  // --- Agent prompts ------------------------------------------------------
+  {
+    id: 'view_course_prompt',
+    section: 'Agent prompts',
+    label: 'View agent prompt',
+    desc: 'Show the prompt this course currently uses for one agent. Returns the effective override (if any) plus the default template — useful before deciding to override.',
+    method: 'GET', url: '/course_prompt', encoding: 'query',
+    fields: [
+      {name: 'agent_type', label: 'Agent', type: 'select',
+       options: [
+         {value: 'instructor', label: 'instructor — content review / question creation'},
+         {value: 'student', label: 'student — interactive tutor'},
+         {value: 'scoring_qa', label: 'scoring_qa — per-question grading (Colab)'},
+         {value: 'scoring_report', label: 'scoring_report — holistic PDF report grading'},
+       ]},
+    ],
+  },
+  {
+    id: 'update_course_prompt',
+    section: 'Agent prompts',
+    label: 'Update agent prompt',
+    desc: 'Override the default prompt for one agent on this course. Leave the textarea empty to clear the override and fall back to the default. You can use the placeholders <<course_name>> and <<course_topics>> in your prompt — they get filled in at runtime.',
+    method: 'POST', url: '/update_course_prompt', encoding: 'json',
+    fields: [
+      {name: 'agent_type', label: 'Agent', type: 'select',
+       options: [
+         {value: 'instructor', label: 'instructor'},
+         {value: 'student', label: 'student'},
+         {value: 'scoring_qa', label: 'scoring_qa'},
+         {value: 'scoring_report', label: 'scoring_report'},
+       ]},
+      {name: 'prompt', label: 'Prompt text (empty = clear override / use default)', type: 'textarea',
+       hint: 'Tip: copy the default template from "View agent prompt" first, edit the parts you want to change, then paste back here.'},
+    ],
+  },
+
   {
     id: 'update_course_config',
     section: 'Course config',
     label: 'Update course config',
-    desc: 'Change AI model, tutor toggle, or per-student rate limits.',
+    desc: 'Change AI model, course metadata (name + topics — feed into agent prompts via <<course_name>>/<<course_topics>> placeholders), tutor toggle, or per-student rate limits. Leave any field blank to leave it unchanged.',
     method: 'POST', url: '/update_course_config', encoding: 'json',
     fields: [
+      {name: 'course_name', label: 'Course name (filled into agent prompts)', type: 'text',
+       hint: 'e.g. "Embedded Systems Design (E1-254)"'},
+      {name: 'course_topics', label: 'Course topics (filled into agent prompts)', type: 'textarea',
+       hint: 'A short paragraph the agents can reason about — what the course covers, key concepts, languages/tools.'},
       {name: 'model', label: 'AI model (e.g. gemini-2.5-pro)', type: 'text'},
       {name: 'isactive_tutor', label: 'Tutor active?', type: 'select',
        options: [{value: '', label: '— no change —'}, {value: 'true', label: 'true'}, {value: 'false', label: 'false'}]},
@@ -541,6 +581,23 @@ async function onSubmit(e) {
   submitBtn.disabled = true;
 
   try {
+    if (svc.encoding === 'query') {
+      // GET with form values as query params; render the JSON response
+      // inline (used by /course_prompt and similar read-only fetches).
+      const vals = collectFieldValues(form, svc);
+      const url = buildQueryUrl(svc.url, vals);
+      const r = await fetch(url, { method: 'GET' });
+      if (!r.ok) {
+        let detail = '';
+        try { detail = (await r.json()).detail || ''; } catch { detail = await r.text(); }
+        appendOut(out, 'err', `HTTP ${r.status}: ${detail}`);
+        return;
+      }
+      const data = await r.json();
+      appendOut(out, 'ok', JSON.stringify(data, null, 2));
+      return;
+    }
+
     if (svc.encoding === 'download') {
       // GET request with query params; trigger a browser download via Blob.
       const vals = collectFieldValues(form, svc);

@@ -335,3 +335,231 @@ class TestNormalizeRubricTypes:
         assert not _is_report_pdf_rubric({"assignment_type": "q&a", "submission_type": "pdf"})
         # q&a+colab → neither.
         assert not _is_pdf_rubric({"assignment_type": "q&a", "submission_type": "colab"})
+
+
+# ---------------------------------------------------------------------------
+# Format-string prompts: <<course_name>> / <<course_topics>>
+# ---------------------------------------------------------------------------
+
+
+class TestFormatPrompt:
+    def test_substitutes_both_placeholders(self):
+        import agent
+        rendered = agent.format_prompt(
+            "Assistant for <<course_name>> on <<course_topics>>.",
+            course_name="Embedded Systems",
+            course_topics="microcontrollers and FPGAs",
+        )
+        assert rendered == "Assistant for Embedded Systems on microcontrollers and FPGAs."
+
+    def test_falls_back_when_course_topics_blank(self):
+        import agent
+        rendered = agent.format_prompt(
+            "On <<course_topics>>.",
+            course_name="X",
+            course_topics="",
+        )
+        # Falls back to a readable default rather than leaving an empty noun phrase.
+        assert "<<course_topics>>" not in rendered
+        assert agent.DEFAULT_COURSE_TOPICS_FALLBACK in rendered
+
+    def test_leaves_other_curly_braces_untouched(self):
+        import agent
+        # Existing prompts use {Relevant course material:} as content markers;
+        # plain str.format would crash on them. Replace-based formatter doesn't.
+        template = "Look for {Relevant course material:} in <<course_name>>."
+        rendered = agent.format_prompt(template, course_name="C", course_topics="T")
+        assert "{Relevant course material:}" in rendered
+        assert "in C." in rendered
+
+    def test_create_agent_uses_formatted_default(self):
+        import agent
+        # Default agent for "instructor" should have placeholders replaced.
+        ag = agent.create_agent(
+            "instructor", course_name="Sample Course",
+            course_topics="signals and systems",
+            course_handle="ch-test-default",
+        )
+        # The exact attribute name on Agent depends on ADK; just check the
+        # resulting instruction string contains our substitutions.
+        instr = getattr(ag, 'instruction', None) or getattr(ag, '_instruction', '')
+        assert "<<course_name>>" not in str(instr)
+        assert "Sample Course" in str(instr)
+
+
+# ---------------------------------------------------------------------------
+# /course_prompt and /update_course_prompt
+# ---------------------------------------------------------------------------
+
+
+class TestCoursePromptEndpoints:
+    def _setup(self, *, instructor="instructor@test.com", overrides=None):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        data = {
+            "instructor_gmail": instructor,
+            "course_name": "CP260 Embedded Systems",
+            "course_topics": "microcontrollers, FPGAs, hardware/software co-design",
+        }
+        if overrides:
+            data.update(overrides)
+        courses[ch] = data
+        return ch
+
+    def _teardown(self, ch):
+        from api_server import courses
+        courses.pop(ch, None)
+
+    def test_view_default_prompt_when_no_override(self, client):
+        ch = self._setup()
+        try:
+            resp = client.get(
+                "/course_prompt",
+                params={"institution_id": "iisc", "term_id": "2025-26",
+                        "course_id": "cp260", "agent_type": "instructor"},
+                headers=_auth_header("instructor@test.com"),
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['agent_type'] == "instructor"
+            assert data['is_default'] is True
+            assert data['course_name'] == "CP260 Embedded Systems"
+            # Default template still has the unresolved placeholders.
+            assert "<<course_name>>" in data['default_template']
+            # The 'prompt' field returns the same template (no override).
+            assert "<<course_name>>" in data['prompt']
+        finally:
+            self._teardown(ch)
+
+    def test_view_returns_override_when_set(self, client):
+        ch = self._setup(overrides={
+            "instructor_assist_prompt": "Custom override for <<course_name>>.",
+        })
+        try:
+            resp = client.get(
+                "/course_prompt",
+                params={"institution_id": "iisc", "term_id": "2025-26",
+                        "course_id": "cp260", "agent_type": "instructor"},
+                headers=_auth_header("instructor@test.com"),
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['is_default'] is False
+            assert data['prompt'].startswith("Custom override")
+
+        finally:
+            self._teardown(ch)
+
+    def test_view_unknown_agent_type_400(self, client):
+        ch = self._setup()
+        try:
+            resp = client.get(
+                "/course_prompt",
+                params={"institution_id": "iisc", "term_id": "2025-26",
+                        "course_id": "cp260", "agent_type": "scoring"},  # legacy alias not exposed
+                headers=_auth_header("instructor@test.com"),
+            )
+            assert resp.status_code == 400
+        finally:
+            self._teardown(ch)
+
+    def test_update_sets_override_and_invalidates_runners(self, client):
+        from unittest.mock import patch as _patch
+        ch = self._setup()
+        try:
+            with _patch("api_server.update_course_info", new_callable=AsyncMock) as mock_upd, \
+                 _patch("api_server.config.invalidate_course_runners") as mock_inv:
+                resp = client.post(
+                    "/update_course_prompt",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260", "agent_type": "scoring_report",
+                          "prompt": "My report grading rubric"},
+                    headers=_auth_header("instructor@test.com"),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data == {"agent_type": "scoring_report", "is_now_default": False}
+            mock_upd.assert_awaited_once()
+            mock_inv.assert_called_once_with(ch)
+            # Cache reflects new override.
+            from api_server import courses
+            assert courses[ch]["scoring_report_prompt"] == "My report grading rubric"
+        finally:
+            self._teardown(ch)
+
+    def test_update_with_empty_prompt_clears_override(self, client):
+        from unittest.mock import patch as _patch
+        ch = self._setup(overrides={"student_assist_prompt": "Old override"})
+        try:
+            with _patch("api_server.update_course_info", new_callable=AsyncMock), \
+                 _patch("api_server.config.invalidate_course_runners"):
+                resp = client.post(
+                    "/update_course_prompt",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260", "agent_type": "student",
+                          "prompt": ""},
+                    headers=_auth_header("instructor@test.com"),
+                )
+            assert resp.status_code == 200
+            assert resp.json()["is_now_default"] is True
+            from api_server import courses
+            assert courses[ch].get("student_assist_prompt") in (None, "")
+        finally:
+            self._teardown(ch)
+
+    def test_update_unauthorized_user_403(self, client):
+        ch = self._setup()
+        try:
+            resp = client.post(
+                "/update_course_prompt",
+                json={"institution_id": "iisc", "term_id": "2025-26",
+                      "course_id": "cp260", "agent_type": "instructor",
+                      "prompt": "trying to hijack"},
+                headers=_auth_header("rando@example.com"),
+            )
+            assert resp.status_code == 403
+        finally:
+            self._teardown(ch)
+
+    def test_invalid_agent_type_rejected_at_model_layer(self, client):
+        ch = self._setup()
+        try:
+            resp = client.post(
+                "/update_course_prompt",
+                json={"institution_id": "iisc", "term_id": "2025-26",
+                      "course_id": "cp260", "agent_type": "rogue",
+                      "prompt": "x"},
+                headers=_auth_header("instructor@test.com"),
+            )
+            # Pydantic validator on the model rejects unknown agent_type.
+            assert resp.status_code == 422
+        finally:
+            self._teardown(ch)
+
+
+class TestUpdateCourseConfigCourseMetadata:
+    def test_course_name_and_topics_invalidate_runners(self, client):
+        from unittest.mock import patch as _patch
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            with _patch("api_server.update_course_info", new_callable=AsyncMock), \
+                 _patch("api_server.config.invalidate_course_runners") as mock_inv:
+                resp = client.post(
+                    "/update_course_config",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260",
+                          "course_name": "CP260", "course_topics": "MCUs and FPGAs"},
+                    headers=_auth_header("instructor@test.com"),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["updated"]["course_name"] == "CP260"
+            assert data["updated"]["course_topics"] == "MCUs and FPGAs"
+            mock_inv.assert_called_once_with(ch)
+            assert courses[ch]["course_name"] == "CP260"
+        finally:
+            courses.pop(ch, None)

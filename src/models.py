@@ -107,10 +107,21 @@ class NotifyGradedResponse(BaseModel):
 
 
 class CreateCourseRequest(BaseModel):
+    """Body for POST /create_course.
+
+    The agent prompts (``instructor_assist_prompt`` etc.) are no longer
+    accepted at create time — they're long, multi-paragraph, and impractical
+    to paste into a single JSON request. Use POST /update_course_prompt
+    after creation if you need to override a default. The course_name and
+    course_topics fields are filled into the prompts'
+    ``<<course_name>>`` / ``<<course_topics>>`` placeholders at agent
+    creation time.
+    """
     course_id: str
     term_id: str
     institution_id: str
     course_name: str | None = None
+    course_topics: str | None = None
     instructor_email: EmailStr|None = None
     instructor_gmail: EmailStr|None = None
     instructor_name: str | None = None
@@ -120,9 +131,6 @@ class CreateCourseRequest(BaseModel):
     ta_email: EmailStr | None = None
     ta_gmail: EmailStr | None = None
     ai_model: str | None = None
-    instructor_assist_prompt: str | None = None
-    student_assist_prompt: str | None = None
-    scoring_assist_prompt: str | None = None
 
 class CreateCourseResponse(BaseModel):
     response: str
@@ -308,6 +316,11 @@ class UpdateCourseConfigRequest(BaseModel):
     isactive_tutor: Optional[bool] = None
     student_rate_limit: Optional[int] = None
     student_rate_limit_window: Optional[int] = None
+    # Filled into the agents' <<course_name>> / <<course_topics>> placeholders.
+    # Updating either invalidates the runner cache so the change is picked up
+    # without restarting the server.
+    course_name: Optional[str] = None
+    course_topics: Optional[str] = None
 
     @field_validator('student_rate_limit')
     @classmethod
@@ -327,6 +340,52 @@ class UpdateCourseConfigRequest(BaseModel):
 
 class UpdateCourseConfigResponse(BaseModel):
     updated: Dict[str, Any]
+
+
+class UpdateCoursePromptRequest(BaseModel):
+    """Set or clear a per-course prompt override for one agent.
+
+    ``agent_type`` must be one of ``"instructor"``, ``"student"``,
+    ``"scoring_qa"``, ``"scoring_report"``. An empty / null ``prompt``
+    clears the override, restoring the default template from agent.py.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    agent_type: str
+    prompt: str | None = None
+
+    @field_validator('agent_type')
+    @classmethod
+    def validate_agent_type(cls, v):
+        allowed = {"instructor", "student", "scoring_qa", "scoring_report"}
+        if v not in allowed:
+            raise ValueError(f"agent_type must be one of {sorted(allowed)}; got {v!r}")
+        return v
+
+
+class UpdateCoursePromptResponse(BaseModel):
+    agent_type: str
+    is_now_default: bool
+
+
+class CoursePromptResponse(BaseModel):
+    """Returned by GET /course_prompt.
+
+    ``prompt`` is the *effective* prompt the agent will use right now —
+    the override if one is set, otherwise the default template formatted
+    with the course's ``course_name`` and ``course_topics``. ``is_default``
+    is True iff there is no override. ``default_template`` is the raw
+    template (with the unresolved ``<<course_name>>`` /
+    ``<<course_topics>>`` placeholders) — useful for the dashboard's
+    "reset to default" button.
+    """
+    agent_type: str
+    prompt: str
+    is_default: bool
+    default_template: str
+    course_name: str
+    course_topics: str
 
 class UpdateGlobalConfigRequest(BaseModel):
     semaphore_limit: Optional[int] = None

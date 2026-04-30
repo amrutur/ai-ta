@@ -482,6 +482,8 @@ The API supports two authentication methods:
 | `/upload_rubric_file` | POST | multipart | Upload a rubric file directly (PDF for PDF assignments) |
 | `/upload_rubric_link` | POST | JSON | Upload a rubric from a Drive share link (PDF mode) |
 | `/my_courses` | GET | — | List the courses the current user can manage (instructor / TA / admin) |
+| `/update_course_prompt` | POST | `UpdateCoursePromptRequest` | Override / clear the prompt for one agent on this course |
+| `/course_prompt` | GET | query | View the effective prompt + default template for one agent on this course |
 
 ### Admin Endpoints (Requires Admin Authentication)
 
@@ -625,19 +627,21 @@ ai-ta/
 
 ### AI Agents
 
-The system uses three specialized agents built with Google ADK. The AI model defaults to `gemini-2.5-pro` but can be configured per course via Firestore (using the `ai_model` field in the course document). Custom agent prompts can also be set per course.
+The system ships four agent types built on Google ADK. Each agent's instruction is a **template** with `<<course_name>>` and `<<course_topics>>` placeholders that get filled at runtime from the course doc. The default templates live in [src/agent.py](src/agent.py); per-course overrides can be set with `POST /update_course_prompt` and viewed via `GET /course_prompt` (or the dashboard's "Agent prompts" section). The AI model defaults to `gemini-2.5-pro` and is configurable per course (`ai_model` field on the course doc, settable via the dashboard's "Update course config").
 
-1. **Instructor Assistant Agent** (`instructor_assist_agent`)
-   - Model: `gemini-2.5-pro` (configurable per course)
-   - Purpose: Assists instructors with content review, question creation, rubric checking, and rubric answer generation
+1. **Instructor Assistant Agent** (`instructor`)
+   Helps instructors with content review, question creation, rubric checking, and rubric answer generation.
 
-2. **Student Tutor Agent** (`ai_tutor_agent`)
-   - Model: `gemini-2.5-pro` (configurable per course)
-   - Purpose: Interactive tutoring — evaluates student answers against rubrics and course materials, provides feedback and hints
+2. **Student Tutor Agent** (`student`)
+   Interactive tutoring — evaluates student answers against rubrics and course materials, provides feedback and hints.
 
-3. **Scoring Agent** (`ai_scoring_agent`)
-   - Model: `gemini-2.5-pro` (configurable per course)
-   - Purpose: Automated grading — component-based scoring with partial credit, matches student answers against rubric components
+3. **Q&A Scoring Agent** (`scoring_qa`)
+   Per-question grading with component-based partial credit. Matches student answers against rubric components.
+
+4. **Report Scoring Agent** (`scoring_report`)
+   Holistic grading of a PDF report against a rubric (rubric + report attached as multimodal Parts so figures, tables, and worked examples reach the model directly).
+
+The legacy `scoring` agent type still resolves to `scoring_qa` for backward compatibility. To set a per-course override prompt, the dashboard's "View agent prompt" button shows the current effective prompt (override if any, else default) plus the raw default template — copy, edit, paste into "Update agent prompt" and save. Empty prompt = clear override.
 
 ### RAG Pipeline
 

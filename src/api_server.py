@@ -71,6 +71,7 @@ from models import (
     GradeAssignmentRequest,
     RegradePdfSubmissionRequest, RegradePdfSubmissionResponse,
     UploadStudentRosterResponse, RosterRowError, PlaceholderRosterMatch,
+    UpdateCoursePromptRequest, UpdateCoursePromptResponse, CoursePromptResponse,
 )
 from auth import (
     create_jwt_token,
@@ -725,7 +726,7 @@ async def grade(query_body: GradeRequest, request: Request):
 
     '''Grade a single question-answer'''
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
-    runner = config.get_runner("scoring", courses, course_handle)
+    runner = config.get_runner("scoring_qa", courses, course_handle)
 
     if ('user' in request.session) : #user is logged and authenticated
         user_id = request.session['user']['id']
@@ -751,7 +752,7 @@ async def grade(query_body: GradeRequest, request: Request):
         answer = query_body.answer + "." if query_body.answer else "No answer."
         rubric = query_body.rubric if query_body.rubric else "No rubric"
 
-        marks, response_text = await score_question(question, answer, rubric, runner, config.get_session_service("scoring", course_handle), user_id)
+        marks, response_text = await score_question(question, answer, rubric, runner, config.get_session_service("scoring_qa", course_handle), user_id)
 
         return GradeResponse(
             response=response_text,
@@ -845,12 +846,12 @@ async def regrade_answer(query_body: RegradeAnswerRequest, request: Request):
             augmented_answer += f"\n\n{{student's contention}}\n{query_body.student_contends}"
 
         # RAG retrieval + scoring
-        runner = config.get_runner("scoring", courses, course_handle)
+        runner = config.get_runner("scoring_qa", courses, course_handle)
 
         rag_material = await retrieve_context(course_handle, rubric_question)
         marks, response_text = await score_question(
             rubric_question, student_answer_str, augmented_answer,
-            runner, config.get_session_service("scoring", course_handle), student_id,
+            runner, config.get_session_service("scoring_qa", course_handle), student_id,
             course_material=rag_material
         )
         logging.info(f"Regraded Q{qnum_str} for {student_id}: {marks} marks")
@@ -923,7 +924,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
     if not is_authorized(user_gmail, course_handle):
         check_student_rate_limit(user_gmail, course_handle)
 
-    runner = config.get_runner("scoring", courses, course_handle)
+    runner = config.get_runner("scoring_qa", courses, course_handle)
 
     async def _generate():
         try:
@@ -977,7 +978,7 @@ async def eval_submission(query_body: EvalRequest, request: Request):
                 rag_material = await retrieve_context(course_handle, rubric_question)
                 marks, response_text = await score_question(
                     rubric_question, str(student_answer_str), str(rubric_answer_str),
-                    runner, config.get_session_service("scoring", course_handle), user_gmail,
+                    runner, config.get_session_service("scoring_qa", course_handle), user_gmail,
                     course_material=rag_material
                 )
                 logging.info(f"Graded Q{qnum_str}: {marks} marks")
@@ -1047,7 +1048,7 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
     if not is_authorized(user_gmail, course_handle):
         raise HTTPException(status_code=403, detail="Only instructors can use the grade_notebook endpoint.")
 
-    runner = config.get_runner("scoring", courses, course_handle)
+    runner = config.get_runner("scoring_qa", courses, course_handle)
     notebook_id = query_body.notebook_id
 
     # Validate rubric data exists for the notebook
@@ -1087,7 +1088,7 @@ async def grade_notebook(query_body: GradeNotebookRequest, request: Request):
             rag_material = await retrieve_context(course_handle, rubric_question)
             marks, response_text = await score_question(
                 rubric_question, str(student_answer_str), str(rubric_answer_str),
-                runner, config.get_session_service("scoring", course_handle), student_id,
+                runner, config.get_session_service("scoring_qa", course_handle), student_id,
                 course_material=rag_material
             )
             logging.info(f"Graded Q{qnum_str} for {student_id}: {marks} marks")
@@ -1554,8 +1555,16 @@ async def update_course_config(
     query_body: UpdateCourseConfigRequest,
     request: Request
 ):
-    '''Update per-course configuration (model, isactive_tutor, student_rate_limit, student_rate_limit_window).
-    Only accessible to instructors or platform admins.'''
+    '''Update per-course configuration.
+
+    Settable fields: ``model``, ``isactive_tutor``, ``student_rate_limit``,
+    ``student_rate_limit_window``, ``course_name``, ``course_topics``.
+    Updating ``model``, ``course_name``, or ``course_topics`` invalidates
+    the cached agent runners for this course so the change takes effect on
+    the next request without a server restart.
+
+    Only accessible to instructors or platform admins.
+    '''
     user = get_current_user(request)
     course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
 
@@ -1567,11 +1576,13 @@ async def update_course_config(
         raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
 
     updated = {}
+    runner_invalidation_needed = False
     try:
         if query_body.model is not None:
-            courses[course_handle]['model'] = query_body.model
-            await update_course_info(config.db, course_handle, 'model', query_body.model)
+            courses[course_handle]['ai_model'] = query_body.model
+            await update_course_info(config.db, course_handle, 'ai_model', query_body.model)
             updated['model'] = query_body.model
+            runner_invalidation_needed = True
 
         if query_body.isactive_tutor is not None:
             courses[course_handle]['isactive_tutor'] = query_body.isactive_tutor
@@ -1592,8 +1603,23 @@ async def update_course_config(
             updated['student_rate_limit_window'] = query_body.student_rate_limit_window
             student_rate_limiter.clear_course(course_handle)
 
+        if query_body.course_name is not None:
+            courses[course_handle]['course_name'] = query_body.course_name
+            await update_course_info(config.db, course_handle, 'course_name', query_body.course_name)
+            updated['course_name'] = query_body.course_name
+            runner_invalidation_needed = True
+
+        if query_body.course_topics is not None:
+            courses[course_handle]['course_topics'] = query_body.course_topics
+            await update_course_info(config.db, course_handle, 'course_topics', query_body.course_topics)
+            updated['course_topics'] = query_body.course_topics
+            runner_invalidation_needed = True
+
         if not updated:
             raise HTTPException(status_code=400, detail="No configuration fields provided to update.")
+
+        if runner_invalidation_needed:
+            config.invalidate_course_runners(course_handle)
 
         logging.info(f"User {user_gmail} updated course config for '{course_handle}': {updated}")
         return UpdateCourseConfigResponse(updated=updated)
@@ -1604,6 +1630,121 @@ async def update_course_config(
         logging.error("Error updating course config: %s", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+# Map agent_type → the field on the course doc that holds the override
+# prompt. Mirrors config._PROMPT_KEYS for the four user-facing agent types
+# (the legacy "scoring" alias isn't surfaced to instructors).
+_PROMPT_OVERRIDE_FIELD = {
+    "instructor": "instructor_assist_prompt",
+    "student": "student_assist_prompt",
+    "scoring_qa": "scoring_qa_prompt",
+    "scoring_report": "scoring_report_prompt",
+}
+
+
+@app.post("/update_course_prompt", response_model=UpdateCoursePromptResponse)
+async def update_course_prompt(
+    query_body: UpdateCoursePromptRequest,
+    request: Request,
+):
+    """Set or clear a per-course override for one agent's prompt.
+
+    A non-empty ``prompt`` replaces the default template for the chosen
+    ``agent_type`` on this course only. An empty (or null) ``prompt``
+    clears the override and restores the default. The override is also
+    run through the placeholder formatter at agent-creation time, so
+    instructors can use the same ``<<course_name>>`` / ``<<course_topics>>``
+    tokens in their custom prompts.
+
+    Invalidates the runner cache for this course so the change takes
+    effect on the next agent call. Instructor / TA / admin only.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can edit agent prompts.")
+
+    field = _PROMPT_OVERRIDE_FIELD.get(query_body.agent_type)
+    if field is None:
+        raise HTTPException(status_code=400, detail=f"Unknown agent_type: {query_body.agent_type!r}")
+
+    new_value = query_body.prompt or ""
+    is_now_default = not new_value.strip()
+
+    # Persist (or clear) the override. We store empty string for "cleared"
+    # so the field remains queryable; get_runner treats empty as "no override".
+    courses[course_handle][field] = new_value if new_value.strip() else None
+    await update_course_info(config.db, course_handle, field, new_value if new_value.strip() else "")
+
+    config.invalidate_course_runners(course_handle)
+
+    logging.info(
+        f"User {user_gmail} {'cleared' if is_now_default else 'updated'} the "
+        f"{query_body.agent_type} prompt for course '{course_handle}'."
+    )
+    return UpdateCoursePromptResponse(
+        agent_type=query_body.agent_type,
+        is_now_default=is_now_default,
+    )
+
+
+@app.get("/course_prompt", response_model=CoursePromptResponse)
+async def get_course_prompt_api(
+    request: Request,
+    institution_id: str,
+    term_id: str,
+    course_id: str,
+    agent_type: str,
+):
+    """Return the *effective* prompt this course will use for one agent.
+
+    If an override is set for the course, it's returned as-is (no
+    placeholder substitution — the dashboard can show what was saved).
+    Otherwise the default template is returned (also unsubstituted) so
+    the instructor can see exactly what they'd be customizing. The
+    ``course_name`` and ``course_topics`` fields tell the dashboard what
+    will actually be filled into the placeholders at runtime.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can view agent prompts.")
+
+    field = _PROMPT_OVERRIDE_FIELD.get(agent_type)
+    if field is None:
+        raise HTTPException(status_code=400, detail=f"Unknown agent_type: {agent_type!r}")
+
+    course_data = courses[course_handle]
+    override = course_data.get(field)
+    default_template = agent.get_default_prompt(agent_type)
+
+    if override and str(override).strip():
+        return CoursePromptResponse(
+            agent_type=agent_type,
+            prompt=str(override),
+            is_default=False,
+            default_template=default_template,
+            course_name=course_data.get('course_name') or '',
+            course_topics=course_data.get('course_topics') or '',
+        )
+
+    return CoursePromptResponse(
+        agent_type=agent_type,
+        prompt=default_template,
+        is_default=True,
+        default_template=default_template,
+        course_name=course_data.get('course_name') or '',
+        course_topics=course_data.get('course_topics') or '',
+    )
 
 
 @app.post("/rate_limit_status")
@@ -2592,7 +2733,7 @@ async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: R
     if not submissions:
         raise HTTPException(status_code=404, detail=f"No PDF submissions ingested for notebook '{query_body.notebook_id}'.")
 
-    runner = config.get_runner("scoring", courses, course_handle)
+    runner = config.get_runner("scoring_report", courses, course_handle)
     rag_material = await retrieve_context(course_handle, problem_statement) if problem_statement else ""
 
     async def _grade_one(sub: dict):
@@ -2613,7 +2754,7 @@ async def grade_pdf_assignment(query_body: GradePdfAssignmentRequest, request: R
             marks, response_text = await score_pdf_submission(
                 problem_statement, rubric_text, sample_graded_response,
                 gcs_uri, runner,
-                config.get_session_service("scoring", course_handle),
+                config.get_session_service("scoring_report", course_handle),
                 user_id, course_material=rag_material,
                 rubric_pdf_uri=rubric_pdf_uri,
             )
@@ -2800,13 +2941,13 @@ async def regrade_pdf_submission(query_body: RegradePdfSubmissionRequest, reques
     if overall.get('response'):
         previous_grading = overall['response']
 
-    runner = config.get_runner("scoring", courses, course_handle)
+    runner = config.get_runner("scoring_report", courses, course_handle)
     rag_material = await retrieve_context(course_handle, problem_statement) if problem_statement else ""
 
     marks, response_text = await score_pdf_submission(
         problem_statement, rubric_text, sample_graded_response,
         gcs_uri, runner,
-        config.get_session_service("scoring", course_handle),
+        config.get_session_service("scoring_report", course_handle),
         query_body.student_id, course_material=rag_material,
         student_contention=query_body.student_contends,
         previous_grading=previous_grading,
@@ -3386,24 +3527,17 @@ async def create_course_api(
         courses[course_handle]['folder_name'] = config.bucket_name+"/"+course_handle+"/"
         courses[course_handle]['created_by'] = current_user.get('email')
         courses[course_handle]['created_at'] = datetime.datetime.utcnow()
+        courses[course_handle]['course_topics'] = query_body.course_topics or ''
 
         courses[course_handle]['isactive_tutor']= True
 
-        # Load platform default values to fall back on for prompts/model
+        # Load platform default values to fall back on for the model. Prompts
+        # are no longer accepted at create time — instructors override them
+        # later via /update_course_prompt if needed.
         default_values = await load_default_values(config.db)
 
-        # AI model and prompts: use supplied values, else fall back to defaults
         courses[course_handle]['ai_model'] = (
             query_body.ai_model or default_values.get('ai_model')
-        )
-        courses[course_handle]['instructor_assist_prompt'] = (
-            query_body.instructor_assist_prompt or default_values.get('instructor_assist_prompt')
-        )
-        courses[course_handle]['student_assist_prompt'] = (
-            query_body.student_assist_prompt or default_values.get('student_assist_prompt')
-        )
-        courses[course_handle]['scoring_assist_prompt'] = (
-            query_body.scoring_assist_prompt or default_values.get('scoring_assist_prompt')
         )
 
         if await create_course(config.db, courses[course_handle]):
