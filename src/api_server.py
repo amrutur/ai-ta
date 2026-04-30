@@ -110,6 +110,7 @@ from database import (
 from drive_utils import (
     download_file_bytes_sa,
     extract_folder_id_from_link,
+    get_file_id_from_share_link,
     list_pdfs_in_folder_sa,
     load_notebook_from_google_drive_sa,
 )
@@ -2164,6 +2165,104 @@ async def upload_rubric_file(
     )
     return AddRubricResponse(
         response=f"Rubric '{notebook_id}' uploaded for course '{course_handle}' (rubric_pdf_uri={rubric_pdf_uri}).",
+    )
+
+
+@app.post("/upload_rubric_link", response_model=AddRubricResponse)
+async def upload_rubric_link(request: Request):
+    """Upload a rubric by share link (Google Drive) instead of file upload.
+
+    Body (JSON): ``{notebook_id, max_marks, institution_id, term_id,
+    course_id, assignment_type, drive_share_link}``.
+
+    For ``assignment_type="pdf"``: we download the rubric from Drive (the
+    file must be shared with the platform service account), copy it to
+    ``gs://{bucket}/{course}/rubrics/{notebook_id}.pdf``, and set
+    ``rubric_pdf_uri`` on the rubric doc — same end state as
+    /upload_rubric_file.
+
+    For ``assignment_type="notebook"``: this endpoint currently returns a
+    501 with guidance to use the Colab client's ``ta.upload_rubric()``,
+    which handles the cell parsing client-side. Server-side .ipynb cell
+    parsing is not yet implemented here.
+    """
+    body = await request.json()
+
+    required = ["notebook_id", "max_marks", "institution_id", "term_id",
+                "course_id", "drive_share_link"]
+    for f in required:
+        if body.get(f) in (None, ""):
+            raise HTTPException(status_code=400, detail=f"Missing required field: {f}")
+
+    assignment_type = body.get("assignment_type", "pdf")
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(body["institution_id"], body["term_id"], body["course_id"])
+
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can upload rubrics for this course.")
+
+    if assignment_type == "notebook":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Notebook rubric upload via link is not yet implemented server-side. "
+                "Please use the Colab client's ta.upload_rubric() function — it parses "
+                "the rubric notebook cells locally and posts the structured data to "
+                "/upload_rubric."
+            ),
+        )
+
+    if assignment_type != "pdf":
+        raise HTTPException(status_code=400, detail=f"Unsupported assignment_type: {assignment_type!r}")
+
+    file_id = get_file_id_from_share_link(body["drive_share_link"])
+    if not file_id:
+        raise HTTPException(status_code=400, detail="Could not parse Drive file ID from the supplied link.")
+
+    pdf_bytes = await asyncio.to_thread(download_file_bytes_sa, config.firestore_cred_dict, file_id)
+    if pdf_bytes is None:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Failed to download rubric from Drive. Ensure the file is shared "
+                f"with the service account ({config.firestore_cred_dict.get('client_email')})."
+            ),
+        )
+    if len(pdf_bytes) > MAX_RUBRIC_PDF_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"Rubric PDF too large ({len(pdf_bytes)} bytes; max {MAX_RUBRIC_PDF_SIZE_BYTES}).")
+
+    notebook_id = body["notebook_id"]
+    max_marks = float(body["max_marks"])
+    destination_path = f"{course_handle}/rubrics/{notebook_id}.pdf"
+    try:
+        rubric_pdf_uri = await asyncio.to_thread(
+            upload_blob, config.bucket_name, destination_path, pdf_bytes, "application/pdf",
+        )
+    except Exception as e:
+        logging.error(f"Failed to upload rubric PDF to GCS: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to copy rubric to GCS: {e}")
+
+    await save_pdf_rubric(
+        config.db, course_handle, notebook_id, max_marks,
+        rubric_pdf_uri=rubric_pdf_uri,
+    )
+    courses[course_handle][notebook_id] = {
+        'assignment_type': 'pdf',
+        'max_marks': max_marks,
+        'problem_statement': '',
+        'rubric_text': '',
+        'sample_graded_response': '',
+        'rubric_pdf_uri': rubric_pdf_uri,
+        'isactive_eval': True,
+    }
+
+    logging.info(
+        f"Instructor {user_gmail} uploaded PDF rubric via Drive link for "
+        f"{course_handle}/{notebook_id} → {rubric_pdf_uri}"
+    )
+    return AddRubricResponse(
+        response=f"Rubric '{notebook_id}' uploaded for course '{course_handle}' from Drive link.",
     )
 
 

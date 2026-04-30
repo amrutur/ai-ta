@@ -153,6 +153,100 @@ class TestUploadRubricFile:
             courses.pop(ch, None)
 
 
+class TestUploadRubricLink:
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/upload_rubric_link",
+            json={"notebook_id": "lab1", "max_marks": 50.0,
+                  "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                  "assignment_type": "pdf",
+                  "drive_share_link": "https://drive.google.com/file/d/X/view"},
+        )
+        assert resp.status_code == 401
+
+    def test_pdf_via_drive_link_uploaded_to_gcs(self, client):
+        from api_server import courses
+        from database import make_course_handle
+
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            with patch("api_server.download_file_bytes_sa", return_value=b"%PDF-rubric"), \
+                 patch("api_server.upload_blob", return_value="gs://b/path/lab1.pdf") as mock_upload, \
+                 patch("api_server.save_pdf_rubric", new_callable=AsyncMock) as mock_save:
+                resp = client.post(
+                    "/upload_rubric_link",
+                    json={"notebook_id": "lab1", "max_marks": 50.0,
+                          "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                          "assignment_type": "pdf",
+                          "drive_share_link": "https://drive.google.com/file/d/RUBRIC_ID/view"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            mock_upload.assert_called_once()
+            mock_save.assert_awaited_once()
+            assert courses[ch]["lab1"]["rubric_pdf_uri"] == "gs://b/path/lab1.pdf"
+        finally:
+            courses.pop(ch, None)
+
+    def test_drive_download_failure_502(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            with patch("api_server.download_file_bytes_sa", return_value=None):
+                resp = client.post(
+                    "/upload_rubric_link",
+                    json={"notebook_id": "lab1", "max_marks": 50.0,
+                          "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                          "assignment_type": "pdf",
+                          "drive_share_link": "https://drive.google.com/file/d/X/view"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 502
+            assert "shared" in resp.text.lower()
+        finally:
+            courses.pop(ch, None)
+
+    def test_notebook_returns_501_with_pointer_to_colab_client(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            resp = client.post(
+                "/upload_rubric_link",
+                json={"notebook_id": "hw1", "max_marks": 100.0,
+                      "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                      "assignment_type": "notebook",
+                      "drive_share_link": "https://colab.research.google.com/drive/X"},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 501
+            assert "Colab" in resp.text or "ta.upload_rubric" in resp.text
+        finally:
+            courses.pop(ch, None)
+
+    def test_bad_link_400(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            resp = client.post(
+                "/upload_rubric_link",
+                json={"notebook_id": "lab1", "max_marks": 50.0,
+                      "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
+                      "assignment_type": "pdf",
+                      "drive_share_link": "https://example.com/not-a-drive-link"},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+        finally:
+            courses.pop(ch, None)
+
+
 class TestUploadPdfRubric:
     def test_pdf_rubric_succeeds(self, client):
         from api_server import courses
