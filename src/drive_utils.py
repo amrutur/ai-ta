@@ -22,6 +22,81 @@ def _build_drive_service(service_account_info: dict):
     return build('drive', 'v3', credentials=credentials)
 
 
+def describe_drive_error(exc: Exception) -> dict:
+    """Convert a Drive API exception into a JSON-friendly diagnostic dict.
+
+    Returns ``{type, status, reason, message, hint}`` where:
+      - ``type``    : Python class name of the exception
+      - ``status``  : HTTP status from googleapiclient.errors.HttpError, or None
+      - ``reason``  : Google API ``reason`` field if present (e.g.
+        ``"insufficientPermissions"``, ``"notFound"``)
+      - ``message`` : the underlying error message
+      - ``hint``    : a human-readable suggestion (e.g. share with SA, enable API)
+
+    Used by the server to give callers actionable detail beyond a generic
+    "Could not access folder" 502.
+    """
+    info: dict = {
+        "type": type(exc).__name__,
+        "status": None,
+        "reason": None,
+        "message": str(exc),
+        "hint": None,
+    }
+
+    if isinstance(exc, HttpError):
+        info["status"] = getattr(getattr(exc, "resp", None), "status", None)
+        # googleapiclient stores the JSON body on .error_details / .reason in
+        # newer versions; fall back to parsing _get_reason() for older ones.
+        try:
+            reason = exc.error_details[0].get("reason") if exc.error_details else None
+        except Exception:
+            reason = None
+        if not reason:
+            try:
+                reason = exc._get_reason()  # type: ignore[attr-defined]
+            except Exception:
+                reason = None
+        info["reason"] = reason
+
+        if info["status"] == 404:
+            info["hint"] = (
+                "Drive resource not found. Either the file/folder ID is wrong, "
+                "the resource is in the trash, or it is not shared with the "
+                "service account."
+            )
+        elif info["status"] == 403:
+            if reason == "insufficientFilePermissions":
+                info["hint"] = (
+                    "The service account is authenticated but the resource is "
+                    "not shared with it. 'Anyone with the link' sharing is "
+                    "often not enough — share the folder/file directly with "
+                    "the service account email (Viewer access)."
+                )
+            elif reason == "accessNotConfigured":
+                info["hint"] = (
+                    "The Drive API is not enabled for the service account's "
+                    "GCP project. Enable it at "
+                    "console.cloud.google.com/apis/library/drive.googleapis.com."
+                )
+            else:
+                info["hint"] = (
+                    "Permission denied. Most commonly this means the folder "
+                    "isn't shared with the service account. 'Anyone with the "
+                    "link' sharing can be unreliable for service-account "
+                    "access — share the folder directly with the SA email."
+                )
+        elif info["status"] == 401:
+            info["hint"] = (
+                "Service account credentials rejected by Drive. Check the "
+                "Firestore SA key and that the SA hasn't been disabled."
+            )
+        elif info["status"] == 429:
+            info["hint"] = "Drive API quota exhausted; retry after a backoff."
+
+    return info
+
+
 def get_file_id_from_share_link(share_link: str) -> str or None:
     """
     Extracts the file ID from a Google Drive share link.

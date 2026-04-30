@@ -5,6 +5,7 @@ Tests for drive_utils — Google Drive link parsing and notebook download helper
 from unittest.mock import MagicMock, patch
 
 from drive_utils import (
+    describe_drive_error,
     download_file_bytes_sa,
     extract_folder_id_from_link,
     get_file_id_from_share_link,
@@ -221,3 +222,47 @@ class TestDownloadFileBytesSa:
         mock_build.return_value = service
 
         assert download_file_bytes_sa({"type": "sa"}, "BAD_ID") is None
+
+
+# ---------------------------------------------------------------------------
+# describe_drive_error — diagnostic mapping for Drive failures
+# ---------------------------------------------------------------------------
+
+
+class TestDescribeDriveError:
+    def test_403_insufficient_permissions_includes_sharing_hint(self):
+        from googleapiclient.errors import HttpError
+        resp = MagicMock(); resp.status = 403; resp.reason = 'Forbidden'
+        err = HttpError(resp, b'{"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}')
+        # error_details on newer googleapiclient is a list of {reason, ...} dicts;
+        # set it directly so we don't depend on internal parsing.
+        err.error_details = [{"reason": "insufficientFilePermissions"}]
+        diag = describe_drive_error(err)
+        assert diag['status'] == 403
+        assert diag['reason'] == "insufficientFilePermissions"
+        assert "share" in diag['hint'].lower()
+
+    def test_404_returns_not_found_hint(self):
+        from googleapiclient.errors import HttpError
+        resp = MagicMock(); resp.status = 404; resp.reason = 'Not Found'
+        err = HttpError(resp, b'{"error":{"message":"File not found"}}')
+        err.error_details = []
+        diag = describe_drive_error(err)
+        assert diag['status'] == 404
+        assert "not found" in diag['hint'].lower() or "trash" in diag['hint'].lower()
+
+    def test_403_access_not_configured_points_at_drive_api(self):
+        from googleapiclient.errors import HttpError
+        resp = MagicMock(); resp.status = 403; resp.reason = 'Forbidden'
+        err = HttpError(resp, b'{}')
+        err.error_details = [{"reason": "accessNotConfigured"}]
+        diag = describe_drive_error(err)
+        assert "Drive API" in (diag['hint'] or '')
+
+    def test_non_http_exception_passes_through(self):
+        diag = describe_drive_error(RuntimeError("network down"))
+        assert diag['type'] == "RuntimeError"
+        assert diag['status'] is None
+        assert diag['message'] == "network down"
+        # No hint for unknown exception types
+        assert diag['hint'] is None

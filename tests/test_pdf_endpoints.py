@@ -155,6 +155,135 @@ class TestUploadRubricFile:
             courses.pop(ch, None)
 
 
+class TestDebugDriveAccess:
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/debug_drive_access",
+            json={"institution_id": "iisc", "term_id": "2025-26",
+                  "course_id": "cp260",
+                  "drive_url": "https://drive.google.com/drive/folders/X"},
+        )
+        assert resp.status_code == 401
+
+    def test_folder_access_success(self, client):
+        ch = _setup_pdf_course()
+        try:
+            files = [
+                {"id": "a", "name": "alice.pdf", "modifiedTime": "T1", "size": "100"},
+                {"id": "b", "name": "bob.pdf", "modifiedTime": "T2", "size": "200"},
+            ]
+            with patch("api_server.list_pdfs_in_folder_sa", return_value=files):
+                resp = client.post(
+                    "/debug_drive_access",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260",
+                          "drive_url": "https://drive.google.com/drive/folders/FOLDER_ID"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['ok'] is True
+            assert data['kind'] == "folder"
+            assert data['drive_id'] == "FOLDER_ID"
+            assert data['items_found'] == 2
+            assert "alice.pdf" in data['sample_names']
+        finally:
+            _teardown(ch)
+
+    def test_folder_access_403_returns_diagnostic(self, client):
+        from googleapiclient.errors import HttpError
+        ch = _setup_pdf_course()
+        try:
+            resp_obj = MagicMock(); resp_obj.status = 403; resp_obj.reason = 'Forbidden'
+            err = HttpError(resp_obj, b'{}')
+            err.error_details = [{"reason": "insufficientFilePermissions"}]
+            with patch("api_server.list_pdfs_in_folder_sa", side_effect=err):
+                resp = client.post(
+                    "/debug_drive_access",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260",
+                          "drive_url": "https://drive.google.com/drive/folders/FOLDER_ID"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['ok'] is False
+            assert data['error_status'] == 403
+            assert data['error_reason'] == "insufficientFilePermissions"
+            assert data['hint'] is not None
+            assert data['sa_email']  # SA email surfaced for sharing
+        finally:
+            _teardown(ch)
+
+    def test_file_url_routes_to_metadata_get(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.list_pdfs_in_folder_sa") as mock_list, \
+                 patch("drive_utils._build_drive_service") as mock_build:
+                # File URL → folder_id None → file branch
+                svc = MagicMock()
+                meta = {"id": "FILE_ID", "name": "rubric.pdf",
+                        "mimeType": "application/pdf", "modifiedTime": "T",
+                        "size": "12345"}
+                svc.files.return_value.get.return_value.execute.return_value = meta
+                mock_build.return_value = svc
+
+                resp = client.post(
+                    "/debug_drive_access",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260",
+                          "drive_url": "https://drive.google.com/file/d/FILE_ID/view"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['kind'] == "file"
+            assert data['ok'] is True
+            assert data['file_metadata']['name'] == "rubric.pdf"
+            mock_list.assert_not_called()
+        finally:
+            _teardown(ch)
+
+    def test_unparseable_url_400(self, client):
+        ch = _setup_pdf_course()
+        try:
+            resp = client.post(
+                "/debug_drive_access",
+                json={"institution_id": "iisc", "term_id": "2025-26",
+                      "course_id": "cp260",
+                      "drive_url": "https://example.com/not-a-drive-link"},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+        finally:
+            _teardown(ch)
+
+
+class TestIngestErrorReporting:
+    def test_403_from_drive_surfaces_underlying_reason(self, client):
+        from googleapiclient.errors import HttpError
+        ch = _setup_pdf_course()
+        try:
+            resp_obj = MagicMock(); resp_obj.status = 403; resp_obj.reason = 'Forbidden'
+            err = HttpError(resp_obj, b'{}')
+            err.error_details = [{"reason": "insufficientFilePermissions"}]
+            with patch("api_server.list_pdfs_in_folder_sa", side_effect=err):
+                resp = client.post(
+                    "/ingest_pdf_submissions",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260", "notebook_id": "lab1",
+                          "drive_folder_url": "https://drive.google.com/drive/folders/X"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 502
+            # Caller should now see the actual status, reason, and SA email.
+            text = resp.text
+            assert "403" in text
+            assert "insufficientFilePermissions" in text
+        finally:
+            _teardown(ch)
+
+
 class TestUploadStudentRoster:
     def _csv(self, text: str):
         return ("roster.csv", text.encode("utf-8"), "text/csv")

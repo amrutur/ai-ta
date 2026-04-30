@@ -188,6 +188,34 @@ class AddRubricResponse(BaseModel):
     response: str
 
 
+class DebugDriveAccessRequest(BaseModel):
+    """Body for POST /debug_drive_access — diagnose Drive access without ingesting.
+
+    The course identifiers are required so we can apply the same
+    instructor-only authorization as the real ingest path.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    drive_url: str
+
+class DebugDriveAccessResponse(BaseModel):
+    ok: bool
+    kind: str  # "folder" or "file"
+    sa_email: str
+    drive_id: str
+    # On success:
+    items_found: int = 0
+    sample_names: List[str] = []
+    file_metadata: Dict[str, Any] | None = None
+    # On failure:
+    error_type: str | None = None
+    error_status: int | None = None
+    error_reason: str | None = None
+    error_message: str | None = None
+    hint: str | None = None
+
+
 class IngestPdfSubmissionsRequest(BaseModel):
     institution_id: str
     term_id: str

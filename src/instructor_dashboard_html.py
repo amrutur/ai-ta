@@ -188,6 +188,17 @@ const SERVICES = [
 
   // --- PDF Submissions (intake only) -------------------------------------
   {
+    id: 'debug_drive_access',
+    section: 'PDF submissions',
+    label: 'Test Drive folder/file access',
+    desc: 'Diagnose whether the platform service account can read a Drive URL before running an ingest. Returns the underlying Drive API status + reason on failure (e.g. 403 insufficientFilePermissions) plus the SA email you need to share with.',
+    method: 'POST', url: '/debug_drive_access', encoding: 'json',
+    fields: [
+      {name: 'drive_url', label: 'Drive folder or file URL', type: 'text', required: true,
+       hint: 'Folder URL (.../drive/folders/<id>) or file share link (.../file/d/<id>).'},
+    ],
+  },
+  {
     id: 'pdf_ingest',
     section: 'PDF submissions',
     label: 'Ingest PDF submissions from Drive',

@@ -65,6 +65,7 @@ from models import (
     UpdateCourseConfigRequest, UpdateCourseConfigResponse,
     UpdateGlobalConfigRequest, UpdateGlobalConfigResponse,
     ListCourseFilesRequest, ListCourseFilesResponse,
+    DebugDriveAccessRequest, DebugDriveAccessResponse,
     IngestPdfSubmissionsRequest, IngestPdfSubmissionsResponse,
     IngestedPdfRecord, SkippedPdfRecord, FailedPdfRecord,
     GradePdfAssignmentRequest,
@@ -113,6 +114,7 @@ from database import (
     upsert_student,
 )
 from drive_utils import (
+    describe_drive_error,
     download_file_bytes_sa,
     extract_folder_id_from_link,
     get_file_id_from_share_link,
@@ -2121,6 +2123,84 @@ MAX_RUBRIC_PDF_SIZE_BYTES = 20 * 1024 * 1024
 MAX_ROSTER_CSV_SIZE_BYTES = 5 * 1024 * 1024
 
 
+@app.post("/debug_drive_access", response_model=DebugDriveAccessResponse)
+async def debug_drive_access(query_body: DebugDriveAccessRequest, request: Request):
+    """Diagnose whether the platform service account can read a Drive URL.
+
+    Pass either a folder URL (``/drive/folders/<id>``) or a file share link
+    (``/file/d/<id>``). The endpoint runs the same Drive API call the
+    ingest / rubric-link paths use and returns a structured diagnostic —
+    SA email, item counts on success, or the underlying HTTP status +
+    Google API ``reason`` + a human hint on failure. Useful when "Anyone
+    with the link" sharing isn't enough and you need to know what to fix.
+
+    Instructor / TA / admin only (the response includes the SA email).
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can run Drive diagnostics.")
+
+    sa_email = config.firestore_cred_dict.get('client_email', '')
+    folder_id = extract_folder_id_from_link(query_body.drive_url)
+    file_id = None if folder_id else get_file_id_from_share_link(query_body.drive_url)
+
+    if folder_id:
+        try:
+            files = await asyncio.to_thread(
+                list_pdfs_in_folder_sa, config.firestore_cred_dict, folder_id,
+            )
+            return DebugDriveAccessResponse(
+                ok=True, kind="folder", sa_email=sa_email,
+                drive_id=folder_id,
+                items_found=len(files),
+                sample_names=[f.get('name', '') for f in files[:10]],
+            )
+        except Exception as e:
+            diag = describe_drive_error(e)
+            return DebugDriveAccessResponse(
+                ok=False, kind="folder", sa_email=sa_email, drive_id=folder_id,
+                error_type=diag['type'], error_status=diag['status'],
+                error_reason=diag['reason'], error_message=diag['message'],
+                hint=diag['hint'],
+            )
+
+    if file_id:
+        # For a file URL, use the metadata-only get to keep the diagnostic
+        # cheap (no full download).
+        from drive_utils import _build_drive_service  # local to dodge import order
+        try:
+            def _get_meta():
+                svc = _build_drive_service(config.firestore_cred_dict)
+                return svc.files().get(
+                    fileId=file_id,
+                    fields="id, name, mimeType, modifiedTime, size",
+                ).execute()
+            meta = await asyncio.to_thread(_get_meta)
+            return DebugDriveAccessResponse(
+                ok=True, kind="file", sa_email=sa_email, drive_id=file_id,
+                file_metadata=meta,
+            )
+        except Exception as e:
+            diag = describe_drive_error(e)
+            return DebugDriveAccessResponse(
+                ok=False, kind="file", sa_email=sa_email, drive_id=file_id,
+                error_type=diag['type'], error_status=diag['status'],
+                error_reason=diag['reason'], error_message=diag['message'],
+                hint=diag['hint'],
+            )
+
+    raise HTTPException(
+        status_code=400,
+        detail="Could not parse a Drive folder or file ID from the supplied URL. "
+               "Expected /drive/folders/<id> or /file/d/<id>.",
+    )
+
+
 @app.post("/upload_student_roster", response_model=UploadStudentRosterResponse)
 async def upload_student_roster(
     request: Request,
@@ -2475,11 +2555,16 @@ async def upload_rubric_link(request: Request):
 
     pdf_bytes = await asyncio.to_thread(download_file_bytes_sa, config.firestore_cred_dict, file_id)
     if pdf_bytes is None:
+        sa_email = config.firestore_cred_dict.get('client_email')
         raise HTTPException(
             status_code=502,
             detail=(
-                "Failed to download rubric from Drive. Ensure the file is shared "
-                f"with the service account ({config.firestore_cred_dict.get('client_email')})."
+                f"Failed to download rubric from Drive. Most common cause: the "
+                f"file is not shared with the service account ({sa_email}). "
+                f"'Anyone with the link' sharing can be unreliable for SA "
+                f"access — share the file directly with the SA email. "
+                f"You can use POST /debug_drive_access to get the underlying "
+                f"Drive API error for this link."
             ),
         )
     if len(pdf_bytes) > MAX_RUBRIC_PDF_SIZE_BYTES:
@@ -2610,8 +2695,15 @@ async def ingest_pdf_submissions(query_body: IngestPdfSubmissionsRequest, reques
     try:
         files = await asyncio.to_thread(list_pdfs_in_folder_sa, config.firestore_cred_dict, folder_id)
     except Exception as e:
-        logging.error(f"Failed to list Drive folder {folder_id}: {e}")
-        raise HTTPException(status_code=502, detail=f"Could not list folder. Ensure the folder is shared with the service account ({config.firestore_cred_dict.get('client_email')}).")
+        diag = describe_drive_error(e)
+        sa_email = config.firestore_cred_dict.get('client_email')
+        logging.error(f"Failed to list Drive folder {folder_id}: {diag}")
+        detail = (
+            f"Could not list Drive folder (status={diag['status']}, "
+            f"reason={diag['reason']}): {diag['message']}. "
+            f"{diag['hint'] or ''} Service account email: {sa_email}."
+        )
+        raise HTTPException(status_code=502, detail=detail.strip())
 
     response = IngestPdfSubmissionsResponse()
 
