@@ -163,10 +163,14 @@ async def extract_authors_with_gemini(
     )
     debug_info["prompt_chars"] = len(prompt)
 
+    # Vertex's response_schema uses OpenAPI-style uppercase type names
+    # (OBJECT / ARRAY / STRING). Lowercase JSON-Schema names like "object"
+    # crash the SDK with KeyError before generate_content runs — observed
+    # in production via the /debug_pdf_authors diagnostic.
     schema = {
-        "type": "object",
+        "type": "OBJECT",
         "properties": {
-            "authors": {"type": "array", "items": {"type": "string"}},
+            "authors": {"type": "ARRAY", "items": {"type": "STRING"}},
         },
         "required": ["authors"],
     }

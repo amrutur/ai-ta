@@ -221,6 +221,29 @@ class TestExtractAuthorsWithGemini:
         assert authors == []
         assert debug_info['error'] and "no text" in debug_info['error'].lower()
 
+    @pytest.mark.asyncio
+    @patch("vertexai.generative_models.GenerativeModel")
+    async def test_schema_uses_uppercase_openapi_types(self, mock_model_cls):
+        # Vertex's GenerationConfig response_schema uses OpenAPI-style
+        # uppercase type names (OBJECT / ARRAY / STRING). Lowercase JSON-
+        # Schema strings ('object') crash the SDK with
+        # KeyError before generate_content even runs — guard against that
+        # regression.
+        instance = MagicMock()
+        response = MagicMock()
+        response.text = '{"authors": ["X"]}'
+        instance.generate_content = MagicMock(return_value=response)
+        mock_model_cls.return_value = instance
+
+        await extract_authors_with_gemini("text")
+
+        gen_kwargs = instance.generate_content.call_args.kwargs
+        cfg = gen_kwargs.get('generation_config') or {}
+        schema = cfg.get('response_schema') or {}
+        assert schema.get('type') == 'OBJECT'
+        assert schema['properties']['authors']['type'] == 'ARRAY'
+        assert schema['properties']['authors']['items']['type'] == 'STRING'
+
 
 class TestParseRosterCsv:
     def test_basic(self):
