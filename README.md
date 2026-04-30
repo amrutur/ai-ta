@@ -228,7 +228,11 @@ Students install the client package in their Colab notebooks:
 
 1. **Login to the system**
 
-   Navigate to `https://your-server-url.run.app/login`
+   Navigate to `https://your-server-url.run.app/` — this is the **instructor dashboard**: a single-page UI with a course picker and buttons for every instructor service (rubric upload, PDF ingest/grade/regrade, batch notebook grading, marks list, grader response, email notifications, course config, rate-limit status, RAG rebuild). All the forms hit the same JSON / multipart endpoints documented below.
+
+   Platform admins use `/admin` to access `/docs`. Colab clients still get a JWT via `/login` → `/get_auth_token`.
+
+   Access is gated by your email matching one of `instructor_email`, `instructor_gmail`, `ta_email`, or `ta_gmail` on the course document. TAs have full instructor scope in this version.
 
 2. **Upload course materials**
 
@@ -464,6 +468,9 @@ The API supports two authentication methods:
 | `/ingest_pdf_submissions` | POST | `IngestPdfSubmissionsRequest` | Ingest PDF reports from a shared Drive folder for a PDF assignment |
 | `/grade_pdf_assignment` | POST | `GradePdfAssignmentRequest` | Stream-grade every ingested PDF submission for a notebook |
 | `/regrade_pdf_submission` | POST | `RegradePdfSubmissionRequest` | Regrade a single student's PDF submission, optionally with contention |
+| `/upload_rubric_file` | POST | multipart | Upload a rubric file directly (PDF for PDF assignments) |
+| `/upload_rubric_link` | POST | JSON | Upload a rubric from a Drive share link (PDF mode) |
+| `/my_courses` | GET | — | List the courses the current user can manage (instructor / TA / admin) |
 
 ### Admin Endpoints (Requires Admin Authentication)
 
