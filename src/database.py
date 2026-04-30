@@ -952,6 +952,31 @@ async def add_placeholder_student(db, course_handle: str, student_id: str, name:
         raise HTTPException(status_code=500, detail="Failed to create placeholder student.")
 
 
+async def delete_student_pdf_mirror(
+    db, course_handle: str, student_id: str, notebook_id: str,
+) -> bool:
+    """Delete a per-student PDF submission mirror doc.
+
+    Returns True if a doc was deleted, False if it didn't exist or the
+    delete failed. Used by /reassign_pdf_submission when moving a
+    submission off a placeholder student onto real student records.
+    Note: only deletes the mirror doc — not the placeholder Student
+    record itself; the instructor can clean those up separately.
+    """
+    try:
+        ref = (db.collection('courses').document(course_handle)
+               .collection('Students').document(student_id)
+               .collection('Notebooks').document(notebook_id))
+        doc = await ref.get()
+        if not doc.exists:
+            return False
+        await ref.delete()
+        return True
+    except Exception as e:
+        logging.error(f"Error deleting mirror doc for {student_id}/{notebook_id}: {e}")
+        return False
+
+
 async def get_student_pdf_mirror(
     db, course_handle: str, student_id: str, notebook_id: str,
 ) -> dict | None:

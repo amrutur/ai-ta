@@ -155,6 +155,239 @@ class TestUploadRubricFile:
             courses.pop(ch, None)
 
 
+class TestDebugPdfAuthors:
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/debug_pdf_authors",
+            json={"institution_id": "iisc", "term_id": "2025-26",
+                  "course_id": "cp260",
+                  "drive_url": "https://drive.google.com/file/d/F/view"},
+        )
+        assert resp.status_code == 401
+
+    def test_drive_download_failure_surfaces_sa_email(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.download_file_bytes_sa", return_value=None):
+                resp = client.post(
+                    "/debug_pdf_authors",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260",
+                          "drive_url": "https://drive.google.com/file/d/FILE_ID/view"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['ok'] is False
+            assert "service account" in (data.get('hint') or '').lower()
+            assert data['drive_file_id'] == "FILE_ID"
+        finally:
+            _teardown(ch)
+
+    def test_image_only_pdf_hint(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.download_file_bytes_sa", return_value=b"%PDF-fake"), \
+                 patch("api_server.extract_first_pages_text", return_value=""), \
+                 patch("api_server.extract_authors_with_gemini",
+                       new_callable=AsyncMock,
+                       return_value=([], {"model": "gemini-2.5-flash",
+                                          "prompt_chars": 0,
+                                          "llm_raw_response": None,
+                                          "parsed": None,
+                                          "error": "no text extracted (PDF may be image-only / scanned)"})), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={}):
+                resp = client.post(
+                    "/debug_pdf_authors",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260",
+                          "drive_url": "https://drive.google.com/file/d/FILE_ID/view"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['ok'] is True
+            assert data['text_extracted_chars'] == 0
+            assert "scanned" in data['hint']
+            assert data['extracted_authors'] == []
+        finally:
+            _teardown(ch)
+
+    def test_authors_with_partial_roster_match(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.download_file_bytes_sa", return_value=b"%PDF-fake"), \
+                 patch("api_server.extract_first_pages_text",
+                       return_value="Title page\nBy Alice Smith and Bob Jones"), \
+                 patch("api_server.extract_authors_with_gemini",
+                       new_callable=AsyncMock,
+                       return_value=(["Alice Smith", "Bob Jones"],
+                                     {"model": "gemini-2.5-flash",
+                                      "prompt_chars": 200,
+                                      "llm_raw_response": '{"authors":["Alice Smith","Bob Jones"]}',
+                                      "parsed": {"authors": ["Alice Smith", "Bob Jones"]},
+                                      "error": None})), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={"alice@iisc.ac.in": "Alice Smith"}):  # Bob NOT enrolled
+                resp = client.post(
+                    "/debug_pdf_authors",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260",
+                          "drive_url": "https://drive.google.com/file/d/FILE_ID/view"},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['ok'] is True
+            assert data['extracted_authors'] == ["Alice Smith", "Bob Jones"]
+            matches = {m['extracted_name']: m for m in data['roster_matches']}
+            assert matches["Alice Smith"]['matched_email'] == "alice@iisc.ac.in"
+            assert matches["Alice Smith"]['would_create_placeholder'] is False
+            assert matches["Bob Jones"]['matched_email'] is None
+            assert matches["Bob Jones"]['would_create_placeholder'] is True
+            assert "roster" in (data['hint'] or '').lower()
+            assert data['llm_debug']['parsed']['authors'] == ["Alice Smith", "Bob Jones"]
+        finally:
+            _teardown(ch)
+
+
+class TestReassignPdfSubmission:
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/reassign_pdf_submission",
+            json={"institution_id": "iisc", "term_id": "2025-26",
+                  "course_id": "cp260", "notebook_id": "lab1",
+                  "drive_file_id": "F", "student_ids": ["a@x.com"]},
+        )
+        assert resp.status_code == 401
+
+    def test_unknown_drive_file_404(self, client):
+        ch = _setup_pdf_course()
+        try:
+            with patch("api_server.get_pdf_submission", new_callable=AsyncMock,
+                       return_value=None):
+                resp = client.post(
+                    "/reassign_pdf_submission",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260", "notebook_id": "lab1",
+                          "drive_file_id": "MISSING",
+                          "student_ids": ["alice@x.com"]},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 404
+        finally:
+            _teardown(ch)
+
+    def test_invalid_email_400(self, client):
+        ch = _setup_pdf_course()
+        try:
+            resp = client.post(
+                "/reassign_pdf_submission",
+                json={"institution_id": "iisc", "term_id": "2025-26",
+                      "course_id": "cp260", "notebook_id": "lab1",
+                      "drive_file_id": "F", "student_ids": ["not-an-email"]},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+        finally:
+            _teardown(ch)
+
+    def test_happy_path_moves_grade_off_placeholder(self, client):
+        ch = _setup_pdf_course()
+        try:
+            tracking = {
+                "drive_file_id": "F",
+                "drive_modified_time": "T1",
+                "gcs_uri": "gs://b/F.pdf",
+                "original_filename": "lab2.pdf",
+                "extracted_authors": [],
+                "student_ids": ["unknown-lab2@pending.local"],
+                "graded_at": "2026-04-30T00:00:00Z",
+                "total_marks": 42.0,
+                "max_marks": 50.0,
+                "grader_response": {"overall": {"marks": 42.0, "response": "good"}},
+            }
+
+            patches = [
+                patch("api_server.get_pdf_submission", new_callable=AsyncMock,
+                      return_value=tracking),
+                patch("api_server.get_student_directory", new_callable=AsyncMock,
+                      return_value={"alice@iisc.ac.in": "Alice"}),  # Bob not enrolled yet
+                patch("api_server.upsert_student", new_callable=AsyncMock),
+                patch("api_server.delete_student_pdf_mirror", new_callable=AsyncMock,
+                      return_value=True),
+                patch("api_server.upsert_pdf_submission", new_callable=AsyncMock),
+                patch("api_server.update_pdf_submission_grade", new_callable=AsyncMock),
+            ]
+            with patches[0] as _, patches[1] as _, \
+                 patches[2] as mock_upsert_stu, \
+                 patches[3] as mock_del, \
+                 patches[4] as mock_ups, \
+                 patches[5] as mock_upd:
+                resp = client.post(
+                    "/reassign_pdf_submission",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260", "notebook_id": "lab1",
+                          "drive_file_id": "F",
+                          "student_ids": ["alice@iisc.ac.in", "bob@iisc.ac.in"]},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['old_student_ids'] == ["unknown-lab2@pending.local"]
+            assert data['new_student_ids'] == ["alice@iisc.ac.in", "bob@iisc.ac.in"]
+            # Bob auto-added (not in roster); Alice was already enrolled.
+            assert data['auto_added_students'] == ["bob@iisc.ac.in"]
+            assert data['cleared_placeholders'] == ["unknown-lab2@pending.local"]
+            mock_upsert_stu.assert_awaited_once()  # only Bob
+            mock_del.assert_awaited_once()         # delete the placeholder mirror
+            mock_ups.assert_awaited_once()         # rewrite tracking + new mirrors
+            mock_upd.assert_awaited_once()         # carry the grade onto new mirrors
+            grade_kwargs = mock_upd.call_args.kwargs
+            assert grade_kwargs['student_ids'] == ["alice@iisc.ac.in", "bob@iisc.ac.in"]
+            assert grade_kwargs['total_marks'] == 42.0
+        finally:
+            _teardown(ch)
+
+    def test_skips_grade_carry_when_not_yet_graded(self, client):
+        # If the tracking doc has no graded_at, reassignment doesn't write a
+        # grade — preserves "not graded yet" state.
+        ch = _setup_pdf_course()
+        try:
+            tracking = {
+                "drive_file_id": "F",
+                "drive_modified_time": "T",
+                "gcs_uri": "gs://b/F.pdf",
+                "original_filename": "lab2.pdf",
+                "extracted_authors": [],
+                "student_ids": ["unknown@pending.local"],
+                # no graded_at
+            }
+            with patch("api_server.get_pdf_submission", new_callable=AsyncMock,
+                       return_value=tracking), \
+                 patch("api_server.get_student_directory", new_callable=AsyncMock,
+                       return_value={"alice@iisc.ac.in": "Alice"}), \
+                 patch("api_server.upsert_student", new_callable=AsyncMock), \
+                 patch("api_server.delete_student_pdf_mirror", new_callable=AsyncMock,
+                       return_value=True), \
+                 patch("api_server.upsert_pdf_submission", new_callable=AsyncMock), \
+                 patch("api_server.update_pdf_submission_grade",
+                       new_callable=AsyncMock) as mock_upd:
+                resp = client.post(
+                    "/reassign_pdf_submission",
+                    json={"institution_id": "iisc", "term_id": "2025-26",
+                          "course_id": "cp260", "notebook_id": "lab1",
+                          "drive_file_id": "F",
+                          "student_ids": ["alice@iisc.ac.in"]},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            mock_upd.assert_not_awaited()  # no grade to carry
+        finally:
+            _teardown(ch)
+
+
 class TestDebugDriveAccess:
     def test_requires_auth(self, client):
         resp = client.post(

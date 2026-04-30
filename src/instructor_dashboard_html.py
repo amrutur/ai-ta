@@ -199,6 +199,17 @@ const SERVICES = [
     ],
   },
   {
+    id: 'debug_pdf_authors',
+    section: 'PDF submissions',
+    label: 'Diagnose PDF author extraction',
+    desc: 'Run the same author-extraction pipeline ingest uses (pypdf + Gemini) on a single Drive PDF. Returns the extracted text size + sample, the raw LLM response, and per-author roster matches — useful when ingest assigned a submission to a placeholder instead of the real students.',
+    method: 'POST', url: '/debug_pdf_authors', encoding: 'json',
+    fields: [
+      {name: 'drive_url', label: 'Drive file URL (a single PDF)', type: 'text', required: true,
+       hint: 'A file share link, e.g. https://drive.google.com/file/d/<id>/view'},
+    ],
+  },
+  {
     id: 'pdf_ingest',
     section: 'PDF submissions',
     label: 'Ingest PDF submissions from Drive',
@@ -222,6 +233,21 @@ const SERVICES = [
       {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
       {name: 'student_id', label: 'Student email or "All" (Colab assignments only — ignored for PDF)', type: 'text', value: 'All'},
       {name: 'do_regrade', label: 'Re-grade already-graded submissions', type: 'checkbox'},
+    ],
+  },
+  {
+    id: 'reassign_pdf',
+    section: 'Grading',
+    label: 'Re-attribute PDF submission',
+    desc: 'Move a graded PDF submission off whatever student_ids ingest assigned it to (often a @pending.local placeholder when author extraction failed) and onto the right student emails. The grade is preserved — no regrade. Auto-enrols any student email that isn\'t already on the course.',
+    method: 'POST', url: '/reassign_pdf_submission', encoding: 'json',
+    fields: [
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
+      {name: 'drive_file_id', label: 'Drive file ID', type: 'text', required: true,
+       hint: 'The id from the Drive folder listing (or from the ingest summary). Not the URL.'},
+      {name: 'student_ids', label: 'Student emails (comma- or whitespace-separated)', type: 'textarea', required: true,
+       splitList: true,
+       hint: 'e.g. alice@iisc.ac.in, bob@iisc.ac.in'},
     ],
   },
   {
@@ -706,6 +732,10 @@ function buildJsonBody(form, svc) {
     if (!el) continue;
     if (f.type === 'checkbox') body[f.name] = !!el.checked;
     else if (f.type === 'number') body[f.name] = el.value === '' ? null : Number(el.value);
+    else if (f.splitList && el.value !== '') {
+      // Split a textarea / text input into an array on commas / whitespace.
+      body[f.name] = el.value.split(/[\s,]+/).filter(Boolean);
+    }
     else if (f.type === 'select') {
       const v = el.value;
       if (v === '') continue;        // — no change —

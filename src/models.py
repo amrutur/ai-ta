@@ -188,6 +188,64 @@ class AddRubricResponse(BaseModel):
     response: str
 
 
+class DebugPdfAuthorsRequest(BaseModel):
+    """Body for POST /debug_pdf_authors — see what author extraction does on a Drive PDF.
+
+    Diagnostic endpoint — runs the same pypdf+Gemini pipeline that ingest
+    uses, but on a single file and returns rich detail (text length, raw
+    LLM response, fuzzy-match results against the current roster) so the
+    instructor can see why authors weren't picked up.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    drive_url: str
+
+class DebugPdfAuthorsRosterMatch(BaseModel):
+    extracted_name: str
+    matched_email: str | None = None
+    would_create_placeholder: bool
+
+class DebugPdfAuthorsResponse(BaseModel):
+    ok: bool
+    drive_file_id: str | None = None
+    filename: str | None = None
+    sa_email: str
+    pdf_size_bytes: int = 0
+    text_extracted_chars: int = 0
+    text_sample: str = ""             # first ~1000 chars of extracted text
+    extracted_authors: List[str] = []
+    llm_debug: Dict[str, Any] = {}    # model, prompt_chars, llm_raw_response, parsed, error
+    roster_matches: List[DebugPdfAuthorsRosterMatch] = []
+    error: str | None = None
+    hint: str | None = None
+
+
+class ReassignPdfSubmissionRequest(BaseModel):
+    """Body for POST /reassign_pdf_submission.
+
+    Moves a PDF submission's grade off whatever student_ids are currently
+    on the per-PDF tracking doc and onto the supplied list of real student
+    emails. Used to fix attributions when author extraction created
+    @pending.local placeholders. The grade is preserved (not regraded);
+    call /grade_pdf_assignment afterward with do_regrade=true if you want
+    to re-evaluate.
+    """
+    institution_id: str
+    term_id: str
+    course_id: str
+    notebook_id: str
+    drive_file_id: str
+    student_ids: List[str]    # emails to attribute the submission to
+
+class ReassignPdfSubmissionResponse(BaseModel):
+    drive_file_id: str
+    old_student_ids: List[str]
+    new_student_ids: List[str]
+    auto_added_students: List[str]   # emails that didn't exist on the course and were auto-added
+    cleared_placeholders: List[str]  # placeholder ids whose mirror docs were deleted
+
+
 class DebugDriveAccessRequest(BaseModel):
     """Body for POST /debug_drive_access — diagnose Drive access without ingesting.
 

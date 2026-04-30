@@ -80,15 +80,30 @@ def is_placeholder_student_id(student_id: str) -> bool:
 async def extract_authors_with_gemini(
     pdf_text: str,
     model_name: str = "gemini-2.5-flash",
-) -> list[str]:
+    debug: bool = False,
+) -> list[str] | tuple[list[str], dict]:
     """Use a small Gemini call to pull author names from cover-page text.
 
     Uses structured output so we get a clean list back. Falls back to an
     empty list on any error — the ingest endpoint will then create a single
     placeholder student rather than failing the whole submission.
+
+    When ``debug=True`` returns ``(authors, debug_info)`` where debug_info is
+    ``{model, prompt_chars, llm_raw_response, parsed, error}``. Used by the
+    diagnostic endpoint to surface what happened end-to-end.
     """
+    debug_info = {
+        "model": model_name,
+        "prompt_chars": 0,
+        "llm_raw_response": None,
+        "parsed": None,
+        "error": None,
+    }
+
     if not pdf_text or not pdf_text.strip():
-        return []
+        debug_info["error"] = "no text extracted (PDF may be image-only / scanned)"
+        logger.info("Author extraction skipped: empty pdf_text.")
+        return ([], debug_info) if debug else []
 
     # Local import so module-level import doesn't fail in test envs that
     # mock out vertexai. agent.py calls vertexai.init() at import time.
@@ -106,6 +121,7 @@ async def extract_authors_with_gemini(
         f"{pdf_text[:MAX_AUTHOR_PROMPT_CHARS]}"
         "\n---"
     )
+    debug_info["prompt_chars"] = len(prompt)
 
     schema = {
         "type": "object",
@@ -125,12 +141,21 @@ async def extract_authors_with_gemini(
                 "response_schema": schema,
             },
         )
+        debug_info["llm_raw_response"] = response.text
         data = json.loads(response.text)
+        debug_info["parsed"] = data
         authors = data.get("authors", [])
-        return [a.strip() for a in authors if isinstance(a, str) and a.strip()]
+        cleaned = [a.strip() for a in authors if isinstance(a, str) and a.strip()]
+        logger.info(
+            "Author extraction: text=%d chars, prompt=%d chars, "
+            "llm returned %d author(s): %s",
+            len(pdf_text), len(prompt), len(cleaned), cleaned,
+        )
+        return (cleaned, debug_info) if debug else cleaned
     except Exception as e:
+        debug_info["error"] = f"{type(e).__name__}: {e}"
         logger.warning(f"Author extraction LLM call failed: {e}")
-        return []
+        return ([], debug_info) if debug else []
 
 
 # Header aliases for roster CSVs. Spreadsheet exports vary; tolerate

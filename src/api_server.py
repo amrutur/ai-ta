@@ -66,6 +66,8 @@ from models import (
     UpdateGlobalConfigRequest, UpdateGlobalConfigResponse,
     ListCourseFilesRequest, ListCourseFilesResponse,
     DebugDriveAccessRequest, DebugDriveAccessResponse,
+    DebugPdfAuthorsRequest, DebugPdfAuthorsResponse, DebugPdfAuthorsRosterMatch,
+    ReassignPdfSubmissionRequest, ReassignPdfSubmissionResponse,
     IngestPdfSubmissionsRequest, IngestPdfSubmissionsResponse,
     IngestedPdfRecord, SkippedPdfRecord, FailedPdfRecord,
     GradePdfAssignmentRequest,
@@ -104,6 +106,7 @@ from database import (
     load_notebooks_from_db,
     load_default_values,
     add_placeholder_student,
+    delete_student_pdf_mirror,
     get_student_directory,
     get_student_pdf_mirror,
     get_pdf_submission,
@@ -2198,6 +2201,218 @@ async def debug_drive_access(query_body: DebugDriveAccessRequest, request: Reque
         status_code=400,
         detail="Could not parse a Drive folder or file ID from the supplied URL. "
                "Expected /drive/folders/<id> or /file/d/<id>.",
+    )
+
+
+@app.post("/debug_pdf_authors", response_model=DebugPdfAuthorsResponse)
+async def debug_pdf_authors(query_body: DebugPdfAuthorsRequest, request: Request):
+    """Diagnose author extraction for a single Drive PDF.
+
+    Runs the same pipeline ``/ingest_pdf_submissions`` uses on its inner
+    loop:
+
+      1. Download the Drive file via the SA.
+      2. Extract first-pages text with pypdf.
+      3. Send to Gemini with the structured-output schema.
+      4. Fuzzy-match returned names against the current Students roster.
+
+    Returns the text size + sample, the LLM raw output, the parsed
+    authors, and per-author roster-match results — so the instructor can
+    see whether the PDF is image-only (no text), the LLM didn't find
+    author names in the cover page, or names didn't match any enrolled
+    student. Instructor / TA / admin only.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can run author diagnostics.")
+
+    sa_email = config.firestore_cred_dict.get('client_email', '')
+    file_id = get_file_id_from_share_link(query_body.drive_url)
+    if not file_id:
+        raise HTTPException(status_code=400, detail=f"Could not parse a Drive file ID from URL.")
+
+    pdf_bytes = await asyncio.to_thread(download_file_bytes_sa, config.firestore_cred_dict, file_id)
+    if pdf_bytes is None:
+        return DebugPdfAuthorsResponse(
+            ok=False, drive_file_id=file_id, sa_email=sa_email,
+            error="Drive download failed (see /debug_drive_access for the underlying status).",
+            hint=f"Share the file directly with the service account email ({sa_email}).",
+        )
+
+    text = await asyncio.to_thread(extract_first_pages_text, pdf_bytes)
+    text_sample = text[:1000]
+
+    extracted, llm_debug = await extract_authors_with_gemini(text, debug=True)
+
+    student_directory = await get_student_directory(config.db, course_handle)
+    roster_matches: list[DebugPdfAuthorsRosterMatch] = []
+    for name in extracted:
+        match = match_author_to_student(name, student_directory)
+        roster_matches.append(DebugPdfAuthorsRosterMatch(
+            extracted_name=name,
+            matched_email=match,
+            would_create_placeholder=match is None,
+        ))
+
+    hint = None
+    if not text.strip():
+        hint = (
+            "pypdf extracted no text — the PDF is likely a scanned image. "
+            "OCR for handwritten / scanned PDFs is captured in "
+            "docs/future_features.md. As a workaround, ask students to "
+            "submit a machine-readable PDF, or use /reassign_pdf_submission "
+            "to attribute the existing grade to the right students manually."
+        )
+    elif not extracted:
+        hint = (
+            "Text extracted but the LLM didn't find any author names. "
+            "Check the cover page format — names should be near the top, "
+            "not buried in a header/footer. You can also use "
+            "/reassign_pdf_submission to fix attribution manually."
+        )
+    elif any(m.would_create_placeholder for m in roster_matches):
+        hint = (
+            "Some extracted names didn't fuzzy-match any roster entry. "
+            "Upload the roster via /upload_student_roster (or fix the "
+            "names there) and re-run the ingest, or call "
+            "/reassign_pdf_submission to attribute the submission manually."
+        )
+
+    return DebugPdfAuthorsResponse(
+        ok=True,
+        drive_file_id=file_id,
+        sa_email=sa_email,
+        pdf_size_bytes=len(pdf_bytes),
+        text_extracted_chars=len(text),
+        text_sample=text_sample,
+        extracted_authors=extracted,
+        llm_debug=llm_debug,
+        roster_matches=roster_matches,
+        hint=hint,
+    )
+
+
+@app.post("/reassign_pdf_submission", response_model=ReassignPdfSubmissionResponse)
+async def reassign_pdf_submission(
+    query_body: ReassignPdfSubmissionRequest,
+    request: Request,
+):
+    """Re-attribute an ingested PDF submission to the right student emails.
+
+    When author extraction creates @pending.local placeholders or assigns
+    a submission to the wrong student, this endpoint moves it onto the
+    correct student records. The existing grade (if any) is preserved
+    and copied onto each new mirror doc — the agent is not re-invoked.
+
+    Behavior:
+      - Updates the per-PDF tracking doc's ``student_ids``.
+      - Deletes the per-student mirror doc for every old student_id (so
+        the wrong student's marks list / grader_response no longer shows
+        this submission).
+      - Creates / merges a per-student mirror doc for every new
+        student_id; auto-adds the student to ``Students/{email}`` if
+        they're not enrolled (with name=email — instructor can fix later).
+      - Re-applies the current grade from the tracking doc to each new
+        mirror.
+      - The placeholder Student records themselves are NOT deleted (in
+        case they're referenced by other submissions); use Firestore to
+        clean them up if desired.
+
+    Instructor / TA / admin only.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(query_body.institution_id, query_body.term_id, query_body.course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can reassign submissions.")
+
+    if not query_body.student_ids:
+        raise HTTPException(status_code=400, detail="student_ids must contain at least one email.")
+
+    # Lower-case + dedupe while preserving order.
+    seen: set[str] = set()
+    new_ids: list[str] = []
+    for sid in query_body.student_ids:
+        sid_l = (sid or "").strip().lower()
+        if not sid_l or "@" not in sid_l:
+            raise HTTPException(status_code=400, detail=f"Not a valid email: {sid!r}")
+        if sid_l not in seen:
+            seen.add(sid_l)
+            new_ids.append(sid_l)
+
+    tracking = await get_pdf_submission(
+        config.db, course_handle, query_body.notebook_id, query_body.drive_file_id,
+    )
+    if tracking is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No PDF submission for drive_file_id={query_body.drive_file_id} on '{query_body.notebook_id}'.",
+        )
+
+    old_ids = list(tracking.get('student_ids') or [])
+    auto_added: list[str] = []
+    cleared_placeholders: list[str] = []
+
+    # 1) Auto-enroll any new student who isn't on the course yet (name=email
+    #    fallback — instructor can refine via roster upload). Then write
+    #    fresh mirror docs.
+    student_directory = await get_student_directory(config.db, course_handle)
+    for sid in new_ids:
+        if sid not in student_directory:
+            await upsert_student(config.db, course_handle, email=sid, name=sid)
+            auto_added.append(sid)
+
+    # 2) Drop mirror docs for old student_ids that aren't in the new set.
+    obsolete = [s for s in old_ids if s not in seen]
+    for sid in obsolete:
+        deleted = await delete_student_pdf_mirror(
+            config.db, course_handle, sid, query_body.notebook_id,
+        )
+        if deleted and sid.endswith("@pending.local"):
+            cleared_placeholders.append(sid)
+
+    # 3) Re-write the tracking doc and seed mirror docs for the new student set.
+    await upsert_pdf_submission(
+        config.db, course_handle, query_body.notebook_id,
+        drive_file_id=query_body.drive_file_id,
+        drive_modified_time=tracking.get('drive_modified_time') or '',
+        gcs_uri=tracking.get('gcs_uri') or '',
+        original_filename=tracking.get('original_filename') or '',
+        extracted_authors=tracking.get('extracted_authors') or [],
+        student_ids=new_ids,
+    )
+
+    # 4) Carry the existing grade onto the new mirror docs.
+    if tracking.get('graded_at') is not None:
+        await update_pdf_submission_grade(
+            config.db, course_handle, query_body.notebook_id,
+            drive_file_id=query_body.drive_file_id,
+            student_ids=new_ids,
+            total_marks=tracking.get('total_marks', 0.0),
+            max_marks=tracking.get('max_marks', 0.0),
+            grader_response=tracking.get('grader_response') or {},
+        )
+
+    logging.info(
+        f"User {user_gmail} reassigned PDF {query_body.drive_file_id} on "
+        f"'{course_handle}/{query_body.notebook_id}': "
+        f"old={old_ids} → new={new_ids} "
+        f"(auto_added={auto_added}, cleared_placeholders={cleared_placeholders})"
+    )
+    return ReassignPdfSubmissionResponse(
+        drive_file_id=query_body.drive_file_id,
+        old_student_ids=old_ids,
+        new_student_ids=new_ids,
+        auto_added_students=auto_added,
+        cleared_placeholders=cleared_placeholders,
     )
 
 
