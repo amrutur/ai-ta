@@ -173,6 +173,19 @@ const SERVICES = [
     fields: [],
   },
 
+  // --- Course roster ------------------------------------------------------
+  {
+    id: 'upload_roster',
+    section: 'Course roster',
+    label: 'Upload student roster (CSV)',
+    desc: 'Upload a CSV with columns name, email, and optional roll_no. Pre-populates Students/{email} so PDFs that only carry student names are matched to the right enrolled student during ingest. Re-uploading is safe — existing records keep their state; name/roll_no get refreshed.',
+    method: 'POST', url: '/upload_student_roster', encoding: 'multipart',
+    fields: [
+      {name: 'file', label: 'Roster CSV', type: 'file', accept: '.csv,text/csv', required: true,
+       hint: 'First row is headers. Aliases accepted: student_name / student_email / gmail / roll / student_id.'},
+    ],
+  },
+
   // --- PDF Submissions (intake only) -------------------------------------
   {
     id: 'pdf_ingest',

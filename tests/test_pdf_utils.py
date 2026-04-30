@@ -11,6 +11,7 @@ from pdf_utils import (
     is_placeholder_student_id,
     make_placeholder_student_id,
     match_author_to_student,
+    parse_roster_csv,
     slugify_name,
 )
 
@@ -167,6 +168,67 @@ class TestExtractAuthorsWithGemini:
         mock_model_cls.return_value = instance
 
         assert await extract_authors_with_gemini("Some text") == []
+
+
+class TestParseRosterCsv:
+    def test_basic(self):
+        csv_text = "name,email\nAlice Smith,alice@iisc.ac.in\nBob Jones,bob@iisc.ac.in\n"
+        rows, skipped = parse_roster_csv(csv_text)
+        assert len(rows) == 2
+        assert rows[0] == {"name": "Alice Smith", "email": "alice@iisc.ac.in", "roll_no": ""}
+        assert skipped == []
+
+    def test_with_roll_no(self):
+        csv_text = "name,email,roll_no\nAlice,alice@x.com,IS-001\n"
+        rows, skipped = parse_roster_csv(csv_text)
+        assert rows[0]["roll_no"] == "IS-001"
+
+    def test_header_aliases(self):
+        # student_name, student_email, student_id should all resolve.
+        csv_text = "Student Name,Student Email,Student ID\nAlice,alice@x.com,42\n"
+        rows, _ = parse_roster_csv(csv_text)
+        assert rows == [{"name": "Alice", "email": "alice@x.com", "roll_no": "42"}]
+
+    def test_email_lowercased(self):
+        csv_text = "name,email\nAlice,Alice@IISC.AC.IN\n"
+        rows, _ = parse_roster_csv(csv_text)
+        assert rows[0]["email"] == "alice@iisc.ac.in"
+
+    def test_missing_email_skipped(self):
+        csv_text = "name,email\nAlice,\nBob,bob@x.com\n"
+        rows, skipped = parse_roster_csv(csv_text)
+        assert len(rows) == 1
+        assert rows[0]["email"] == "bob@x.com"
+        assert len(skipped) == 1
+        assert "missing email" in skipped[0][2]
+
+    def test_missing_name_skipped(self):
+        csv_text = "name,email\n,alice@x.com\nBob,bob@x.com\n"
+        rows, skipped = parse_roster_csv(csv_text)
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Bob"
+        assert any("missing name" in s[2] for s in skipped)
+
+    def test_invalid_email_skipped(self):
+        csv_text = "name,email\nAlice,not-an-email\n"
+        rows, skipped = parse_roster_csv(csv_text)
+        assert rows == []
+        assert any("invalid email" in s[2] for s in skipped)
+
+    def test_blank_rows_silently_skipped(self):
+        csv_text = "name,email\n,\nAlice,alice@x.com\n,\n"
+        rows, skipped = parse_roster_csv(csv_text)
+        assert len(rows) == 1
+        assert skipped == []  # blank rows don't generate a skip entry
+
+    def test_missing_required_column_yields_header_error(self):
+        # Missing email column → bail out with a header-level skip entry.
+        csv_text = "name,roll_no\nAlice,42\n"
+        rows, skipped = parse_roster_csv(csv_text)
+        assert rows == []
+        assert len(skipped) == 1
+        assert skipped[0][0] == 0  # header-level
+        assert "name" in skipped[0][2] and "email" in skipped[0][2]
 
 
 # Make AsyncMock unused-import warning go away if linter complains

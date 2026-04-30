@@ -153,6 +153,144 @@ class TestUploadRubricFile:
             courses.pop(ch, None)
 
 
+class TestUploadStudentRoster:
+    def _csv(self, text: str):
+        return ("roster.csv", text.encode("utf-8"), "text/csv")
+
+    def test_requires_auth(self, client):
+        resp = client.post(
+            "/upload_student_roster",
+            data={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260"},
+            files={"file": self._csv("name,email\nAlice,alice@x.com\n")},
+        )
+        assert resp.status_code == 401
+
+    def test_happy_path_adds_and_updates(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            async def fake_upsert(db, course_handle, email, name, roll_no=None):
+                # Simulate: alice is added, bob is updated
+                return "added" if email.startswith("alice") else "updated"
+
+            with patch("api_server.upsert_student", side_effect=fake_upsert), \
+                 patch("api_server.list_placeholder_students", new_callable=AsyncMock,
+                       return_value={}):
+                resp = client.post(
+                    "/upload_student_roster",
+                    data={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260"},
+                    files={"file": self._csv("name,email\nAlice,alice@x.com\nBob,bob@x.com\n")},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["added"] == ["alice@x.com"]
+            assert data["updated"] == ["bob@x.com"]
+            assert data["skipped"] == []
+            assert data["matching_placeholders"] == []
+        finally:
+            courses.pop(ch, None)
+
+    def test_reports_csv_row_errors(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            async def fake_upsert(db, course_handle, email, name, roll_no=None):
+                return "added"
+            csv_text = "name,email\nAlice,not-an-email\nBob,bob@x.com\n"
+            with patch("api_server.upsert_student", side_effect=fake_upsert), \
+                 patch("api_server.list_placeholder_students", new_callable=AsyncMock,
+                       return_value={}):
+                resp = client.post(
+                    "/upload_student_roster",
+                    data={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260"},
+                    files={"file": self._csv(csv_text)},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["added"] == ["bob@x.com"]
+            assert len(data["skipped"]) == 1
+            assert "invalid email" in data["skipped"][0]["reason"]
+        finally:
+            courses.pop(ch, None)
+
+    def test_detects_placeholder_matches(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            async def fake_upsert(db, course_handle, email, name, roll_no=None):
+                return "added"
+            placeholders = {
+                "jane-doe@pending.local": {"name": "Jane Doe"},
+                "carol@pending.local":    {"name": "Carol Lee"},
+            }
+            with patch("api_server.upsert_student", side_effect=fake_upsert), \
+                 patch("api_server.list_placeholder_students", new_callable=AsyncMock,
+                       return_value=placeholders):
+                resp = client.post(
+                    "/upload_student_roster",
+                    data={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260"},
+                    files={"file": self._csv("name,email\nJane Doe,jane@x.com\nDavid,david@x.com\n")},
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            # Jane matches the roster; Carol doesn't.
+            ids = [m["placeholder_student_id"] for m in data["matching_placeholders"]]
+            assert "jane-doe@pending.local" in ids
+            assert "carol@pending.local" not in ids
+            jane = next(m for m in data["matching_placeholders"] if m["placeholder_student_id"] == "jane-doe@pending.local")
+            assert jane["matched_email"] == "jane@x.com"
+        finally:
+            courses.pop(ch, None)
+
+    def test_empty_file_400(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            resp = client.post(
+                "/upload_student_roster",
+                data={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260"},
+                files={"file": self._csv("")},
+                headers=_instructor_header(),
+            )
+            assert resp.status_code == 400
+        finally:
+            courses.pop(ch, None)
+
+    def test_missing_required_columns(self, client):
+        from api_server import courses
+        from database import make_course_handle
+        ch = make_course_handle("iisc", "2025-26", "cp260")
+        courses[ch] = {"instructor_gmail": "instructor@test.com"}
+        try:
+            with patch("api_server.list_placeholder_students", new_callable=AsyncMock,
+                       return_value={}):
+                resp = client.post(
+                    "/upload_student_roster",
+                    data={"institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260"},
+                    files={"file": self._csv("name,roll_no\nAlice,42\n")},  # no email column
+                    headers=_instructor_header(),
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["added"] == []
+            # The header-level error surfaces in skipped.
+            assert len(data["skipped"]) == 1
+            assert "name" in data["skipped"][0]["reason"]
+        finally:
+            courses.pop(ch, None)
+
+
 class TestUploadRubricLink:
     def test_requires_auth(self, client):
         resp = client.post(

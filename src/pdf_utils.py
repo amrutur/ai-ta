@@ -133,6 +133,68 @@ async def extract_authors_with_gemini(
         return []
 
 
+# Header aliases for roster CSVs. Spreadsheet exports vary; tolerate
+# common variants so instructors don't have to massage column names.
+_NAME_ALIASES = {"name", "student_name", "full_name", "student"}
+_EMAIL_ALIASES = {"email", "student_email", "gmail", "e-mail"}
+_ROLL_ALIASES = {"roll_no", "roll", "roll_number", "rollno", "student_id", "id"}
+
+
+def _normalize_header(h: str) -> str:
+    return (h or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def parse_roster_csv(csv_text: str) -> tuple[list[dict], list[tuple[int, dict, str]]]:
+    """Parse a roster CSV into normalised rows + a list of skipped rows.
+
+    Accepts a flexible header set: a column matching one of name/student_name/
+    full_name/student is treated as the name; email/student_email/gmail/e-mail
+    as the email; roll_no/roll/roll_number/rollno/student_id/id as the optional
+    roll number.
+
+    Returns ``(rows, skipped)`` where each row is
+    ``{name, email, roll_no}`` (lowercased email) and skipped is
+    ``[(row_number, raw_row, reason), ...]``.
+    """
+    import csv as _csv
+    import io as _io
+
+    rows: list[dict] = []
+    skipped: list[tuple[int, dict, str]] = []
+
+    reader = _csv.DictReader(_io.StringIO(csv_text))
+    if not reader.fieldnames:
+        return [], []
+
+    norm_headers = {h: _normalize_header(h) for h in reader.fieldnames}
+    name_col = next((h for h, n in norm_headers.items() if n in _NAME_ALIASES), None)
+    email_col = next((h for h, n in norm_headers.items() if n in _EMAIL_ALIASES), None)
+    roll_col = next((h for h, n in norm_headers.items() if n in _ROLL_ALIASES), None)
+
+    if name_col is None or email_col is None:
+        return [], [(0, {"headers": list(reader.fieldnames)},
+                     "CSV must have 'name' and 'email' columns "
+                     "(or aliases like student_name/student_email).")]
+
+    for i, raw in enumerate(reader, start=2):  # row 1 is the header
+        name = (raw.get(name_col) or "").strip()
+        email = (raw.get(email_col) or "").strip().lower()
+        roll = (raw.get(roll_col) or "").strip() if roll_col else ""
+        if not name and not email:
+            continue  # silently skip blank lines
+        if not email:
+            skipped.append((i, raw, "missing email"))
+            continue
+        if "@" not in email:
+            skipped.append((i, raw, f"invalid email: {email!r}"))
+            continue
+        if not name:
+            skipped.append((i, raw, "missing name"))
+            continue
+        rows.append({"name": name, "email": email, "roll_no": roll})
+    return rows, skipped
+
+
 def match_author_to_student(
     author_name: str,
     student_directory: dict[str, str],

@@ -16,9 +16,11 @@ from database import (
     get_student_directory,
     get_student_pdf_mirror,
     list_pdf_submissions,
+    list_placeholder_students,
     save_pdf_rubric,
     update_pdf_submission_grade,
     upsert_pdf_submission,
+    upsert_student,
 )
 
 
@@ -399,6 +401,100 @@ class TestGetStudentPdfMirror:
         snap = MagicMock(); snap.exists = False
         db, _, _ = _make_db_with_doc(doc_get=AsyncMock(return_value=snap))
         assert await get_student_pdf_mirror(db, "ch", "alice@x.com", "nb") is None
+
+
+class TestUpsertStudent:
+    @pytest.mark.asyncio
+    async def test_added_when_new(self):
+        course_snap = MagicMock(); course_snap.exists = True
+        student_snap = MagicMock(); student_snap.exists = False
+
+        course_doc = MagicMock()
+        course_doc.get = AsyncMock(return_value=course_snap)
+        student_doc = MagicMock()
+        student_doc.get = AsyncMock(return_value=student_snap)
+        student_doc.set = AsyncMock()
+
+        students_coll = MagicMock()
+        students_coll.document.return_value = student_doc
+        course_doc.collection.return_value = students_coll
+
+        db = MagicMock()
+        db.collection.return_value.document.return_value = course_doc
+
+        result = await upsert_student(db, "ch", "alice@x.com", "Alice Smith", roll_no="42")
+        assert result == "added"
+        student_doc.set.assert_awaited_once()
+        payload = student_doc.set.call_args.args[0]
+        assert payload['name'] == "Alice Smith"
+        assert payload['initialized'] is True
+        assert payload['roll_no'] == "42"
+
+    @pytest.mark.asyncio
+    async def test_updated_when_exists_uses_merge(self):
+        course_snap = MagicMock(); course_snap.exists = True
+        student_snap = MagicMock(); student_snap.exists = True
+
+        course_doc = MagicMock()
+        course_doc.get = AsyncMock(return_value=course_snap)
+        student_doc = MagicMock()
+        student_doc.get = AsyncMock(return_value=student_snap)
+        student_doc.set = AsyncMock()
+
+        students_coll = MagicMock()
+        students_coll.document.return_value = student_doc
+        course_doc.collection.return_value = students_coll
+
+        db = MagicMock()
+        db.collection.return_value.document.return_value = course_doc
+
+        result = await upsert_student(db, "ch", "alice@x.com", "Alice Smith")
+        assert result == "updated"
+        # Existing student → merge=True so we don't clobber created_at, etc.
+        kwargs = student_doc.set.call_args.kwargs
+        assert kwargs.get('merge') is True
+
+    @pytest.mark.asyncio
+    async def test_omits_roll_no_when_blank(self):
+        course_snap = MagicMock(); course_snap.exists = True
+        student_snap = MagicMock(); student_snap.exists = False
+        course_doc = MagicMock()
+        course_doc.get = AsyncMock(return_value=course_snap)
+        student_doc = MagicMock()
+        student_doc.get = AsyncMock(return_value=student_snap)
+        student_doc.set = AsyncMock()
+        students_coll = MagicMock()
+        students_coll.document.return_value = student_doc
+        course_doc.collection.return_value = students_coll
+        db = MagicMock()
+        db.collection.return_value.document.return_value = course_doc
+
+        await upsert_student(db, "ch", "alice@x.com", "Alice", roll_no=None)
+        payload = student_doc.set.call_args.args[0]
+        assert 'roll_no' not in payload
+
+
+class TestListPlaceholderStudents:
+    @pytest.mark.asyncio
+    async def test_filters_to_pending_local_only(self):
+        d1 = MagicMock(); d1.id = "alice@iisc.ac.in"; d1.to_dict.return_value = {"name": "Alice"}
+        d2 = MagicMock(); d2.id = "jane-doe@pending.local"; d2.to_dict.return_value = {"name": "Jane Doe"}
+        d3 = MagicMock(); d3.id = "j-r-r-tolkien@pending.local"; d3.to_dict.return_value = {"name": "J. R. R. Tolkien"}
+
+        async def gen():
+            for d in (d1, d2, d3):
+                yield d
+
+        students_coll = MagicMock()
+        students_coll.stream = MagicMock(return_value=gen())
+        course_doc = MagicMock()
+        course_doc.collection.return_value = students_coll
+        db = MagicMock()
+        db.collection.return_value.document.return_value = course_doc
+
+        result = await list_placeholder_students(db, "ch")
+        assert set(result.keys()) == {"jane-doe@pending.local", "j-r-r-tolkien@pending.local"}
+        assert result["jane-doe@pending.local"]["name"] == "Jane Doe"
 
 
 def test_subcollection_constant():

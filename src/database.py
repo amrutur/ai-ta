@@ -855,6 +855,66 @@ async def update_pdf_submission_grade(
         raise HTTPException(status_code=500, detail="An unexpected error while updating PDF marks.")
 
 
+async def upsert_student(
+    db,
+    course_handle: str,
+    email: str,
+    name: str,
+    roll_no: str | None = None,
+) -> str:
+    """Insert or update a student record from a roster row.
+
+    Used by /upload_student_roster: pre-populates the Students subcollection
+    with name + email so the PDF ingest flow's fuzzy author matcher can
+    resolve names to canonical email-keyed records.
+
+    For an existing student, refreshes ``name`` and ``roll_no`` if supplied
+    but preserves ``created_at`` and any per-student state already there
+    (e.g. ``initialized``, graded notebooks). For a new student, creates the
+    record with ``initialized=True`` so it's not flagged as a placeholder.
+
+    Returns ``"added"`` or ``"updated"``.
+    """
+    course_ref = db.collection('courses').document(course_handle)
+    course_doc = await course_ref.get()
+    if not course_doc.exists:
+        raise CourseNotFoundError(course_handle)
+
+    student_ref = course_ref.collection('Students').document(email)
+    student_doc = await student_ref.get()
+
+    payload: dict[str, Any] = {'name': name, 'initialized': True}
+    if roll_no is not None and roll_no != '':
+        payload['roll_no'] = roll_no
+
+    if student_doc.exists:
+        # Don't clobber created_at or pending_review etc.
+        await student_ref.set(payload, merge=True)
+        return "updated"
+    else:
+        payload['created_at'] = firestore.SERVER_TIMESTAMP
+        await student_ref.set(payload)
+        return "added"
+
+
+async def list_placeholder_students(db, course_handle: str) -> dict[str, dict]:
+    """Return ``{placeholder_student_id: {name, ...}}`` for all @pending.local students.
+
+    Used during roster upload to detect placeholders that fuzzy-match a real
+    roster entry, so the response can highlight them for the instructor.
+    """
+    out: dict[str, dict] = {}
+    try:
+        students_ref = (db.collection('courses').document(course_handle)
+                        .collection('Students'))
+        async for doc in students_ref.stream():
+            if doc.id.endswith('@pending.local'):
+                out[doc.id] = doc.to_dict() or {}
+    except Exception as e:
+        logging.error(f"Error listing placeholder students for {course_handle}: {e}")
+    return out
+
+
 async def add_placeholder_student(db, course_handle: str, student_id: str, name: str, drive_file_id: str):
     """Create a placeholder student record for an unmatched PDF author.
 

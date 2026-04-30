@@ -204,6 +204,26 @@ class GradePdfAssignmentRequest(BaseModel):
     do_regrade: bool = False
 
 
+class RosterRowError(BaseModel):
+    row_number: int
+    raw: Dict[str, Any]
+    reason: str
+
+class PlaceholderRosterMatch(BaseModel):
+    placeholder_student_id: str
+    placeholder_name: str
+    matched_email: str
+    matched_name: str
+
+class UploadStudentRosterResponse(BaseModel):
+    added: List[str] = []
+    updated: List[str] = []
+    skipped: List[RosterRowError] = []
+    # Placeholders (@pending.local) whose names fuzzy-match a roster entry.
+    # Detection only — no auto-merge in this version.
+    matching_placeholders: List[PlaceholderRosterMatch] = []
+
+
 class GradeAssignmentRequest(BaseModel):
     """Unified grade-an-assignment request.
 

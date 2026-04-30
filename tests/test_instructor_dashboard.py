@@ -282,3 +282,8 @@ class TestDashboardServiceRegistry:
         # User-visible rename: "Notebook assignments" → "Colab assignments".
         resp = client.get("/", headers=_auth_header("admin@test.com"))
         assert "Colab assignments" in resp.text
+
+    def test_includes_roster_upload(self, client):
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        assert "/upload_student_roster" in resp.text
+        assert "Course roster" in resp.text

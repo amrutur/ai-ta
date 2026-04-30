@@ -70,6 +70,7 @@ from models import (
     GradePdfAssignmentRequest,
     GradeAssignmentRequest,
     RegradePdfSubmissionRequest, RegradePdfSubmissionResponse,
+    UploadStudentRosterResponse, RosterRowError, PlaceholderRosterMatch,
 )
 from auth import (
     create_jwt_token,
@@ -105,8 +106,10 @@ from database import (
     get_student_pdf_mirror,
     get_pdf_submission,
     list_pdf_submissions,
+    list_placeholder_students,
     update_pdf_submission_grade,
     upsert_pdf_submission,
+    upsert_student,
 )
 from drive_utils import (
     download_file_bytes_sa,
@@ -120,6 +123,7 @@ from pdf_utils import (
     extract_first_pages_text,
     make_placeholder_student_id,
     match_author_to_student,
+    parse_roster_csv,
 )
 from email_service import send_email
 from storage_utils import upload_blob, generate_signed_upload_url, list_blobs
@@ -1898,6 +1902,113 @@ async def upload_rubric_api(
 
 
 MAX_RUBRIC_PDF_SIZE_BYTES = 20 * 1024 * 1024
+MAX_ROSTER_CSV_SIZE_BYTES = 5 * 1024 * 1024
+
+
+@app.post("/upload_student_roster", response_model=UploadStudentRosterResponse)
+async def upload_student_roster(
+    request: Request,
+    institution_id: str = Form(...),
+    term_id: str = Form(...),
+    course_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload a CSV roster of (name, email, roll_no?) for a course.
+
+    Use this *before* /ingest_pdf_submissions when the PDFs only carry
+    student names. Pre-populating Students/{email} with names lets the
+    fuzzy author matcher resolve names → email on ingest, so submissions
+    end up under canonical email-keyed records instead of @pending.local
+    placeholders.
+
+    Behavior:
+      - Existing students keep created_at and any per-student state; only
+        name and roll_no are refreshed.
+      - New students are created with initialized=True (not flagged as
+        pending_review).
+      - The response also lists @pending.local placeholders whose names
+        fuzzy-match a roster entry, so the instructor can spot records
+        worth merging. (Detection only; no auto-merge in this version.)
+
+    CSV format: first row is headers. Required columns 'name' and 'email'
+    (or aliases like student_name / student_email / gmail). Optional
+    'roll_no' / 'roll' / 'student_id' / 'id'. Empty rows are silently
+    skipped; rows with bad / missing email are reported in ``skipped``.
+    """
+    user = get_current_user(request)
+    user_gmail = user.get('email', '').lower()
+    course_handle = make_course_handle(institution_id, term_id, course_id)
+
+    if course_handle not in courses:
+        raise HTTPException(status_code=404, detail=f"Course '{course_handle}' not found.")
+    if not is_authorized(user_gmail, course_handle):
+        raise HTTPException(status_code=403, detail="Only instructors/TAs can upload the roster.")
+
+    csv_bytes = await file.read()
+    if not csv_bytes:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(csv_bytes) > MAX_ROSTER_CSV_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"Roster CSV too large ({len(csv_bytes)} bytes; max {MAX_ROSTER_CSV_SIZE_BYTES}).")
+
+    try:
+        csv_text = csv_bytes.decode('utf-8-sig')  # handle Excel BOM
+    except UnicodeDecodeError:
+        try:
+            csv_text = csv_bytes.decode('latin-1')
+        except Exception:
+            raise HTTPException(status_code=400, detail="Could not decode CSV (try UTF-8).")
+
+    rows, parse_skipped = parse_roster_csv(csv_text)
+
+    response = UploadStudentRosterResponse()
+
+    # Header-level errors come back with row_number=0; surface them and bail.
+    for row_num, raw, reason in parse_skipped:
+        response.skipped.append(RosterRowError(row_number=row_num, raw=raw, reason=reason))
+    if not rows:
+        return response
+
+    for row in rows:
+        try:
+            status = await upsert_student(
+                config.db, course_handle,
+                email=row['email'], name=row['name'],
+                roll_no=row.get('roll_no') or None,
+            )
+            if status == "added":
+                response.added.append(row['email'])
+            else:
+                response.updated.append(row['email'])
+        except Exception as e:
+            logging.error(f"Failed to upsert student {row.get('email')}: {e}")
+            response.skipped.append(RosterRowError(
+                row_number=-1, raw=row, reason=f"upsert failed: {e}",
+            ))
+
+    # Detect @pending.local placeholders whose names fuzzy-match a roster entry.
+    placeholders = await list_placeholder_students(config.db, course_handle)
+    if placeholders:
+        roster_directory = {row['email']: row['name'] for row in rows}
+        for ph_id, ph_data in placeholders.items():
+            ph_name = ph_data.get('name', '')
+            if not ph_name:
+                continue
+            matched_email = match_author_to_student(ph_name, roster_directory)
+            if matched_email:
+                response.matching_placeholders.append(PlaceholderRosterMatch(
+                    placeholder_student_id=ph_id,
+                    placeholder_name=ph_name,
+                    matched_email=matched_email,
+                    matched_name=roster_directory[matched_email],
+                ))
+
+    logging.info(
+        f"Roster upload for {course_handle}: "
+        f"{len(response.added)} added, {len(response.updated)} updated, "
+        f"{len(response.skipped)} skipped, "
+        f"{len(response.matching_placeholders)} placeholder(s) match a roster entry."
+    )
+    return response
 
 
 @app.get("/download_marks")
