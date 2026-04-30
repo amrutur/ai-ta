@@ -86,6 +86,19 @@ _mock_firestore_service = MagicMock()
 _mock_firestore_service.FirestoreSessionService = MagicMock
 sys.modules["firestore_service"] = _mock_firestore_service
 
+# ---------------------------------------------------------------------------
+# 2c. Inject mock ``vertexai`` so pdf_utils' local import of
+#     ``vertexai.generative_models.GenerativeModel`` resolves without the real
+#     SDK installed. Tests can still patch the GenerativeModel class on this
+#     stub via ``patch("vertexai.generative_models.GenerativeModel")``.
+# ---------------------------------------------------------------------------
+if "vertexai" not in sys.modules:
+    _mock_vertexai = MagicMock()
+    _mock_vertexai.generative_models = MagicMock()
+    _mock_vertexai.generative_models.GenerativeModel = MagicMock
+    sys.modules["vertexai"] = _mock_vertexai
+    sys.modules["vertexai.generative_models"] = _mock_vertexai.generative_models
+
 
 # ---------------------------------------------------------------------------
 # 3. Common fixtures

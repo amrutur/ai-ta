@@ -19,3 +19,4 @@ PyJWT==2.11.0
 google-cloud-storage==3.9.0
 pypdf==5.1.0
 python-multipart==0.0.22
+rapidfuzz==3.10.1
