@@ -1223,7 +1223,10 @@ async def session_test(request: Request):
 
 # ==================== Instructor-or-admin-Only Endpoints ====================
 def is_authorized(user_gmail: str, course_handle: str) -> bool:
-    """Check if the user is an instructor for the course or a platform admin."""
+    """Check if the user is an instructor or TA for the course, or a platform admin.
+
+    For this version TAs have the same authorization scope as instructors.
+    """
     if not user_gmail:
         return False
     user_lower = user_gmail.lower()
@@ -1232,14 +1235,73 @@ def is_authorized(user_gmail: str, course_handle: str) -> bool:
     if user_lower == config.admin_email:
         return True
 
-    # Check all instructor-related email fields on the course
+    # Check all instructor / TA email fields on the course
     course_data = courses.get(course_handle, {})
-    for field in ('instructor_gmail', 'instructor_email', 'created_by'):
+    for field in ('instructor_gmail', 'instructor_email', 'created_by',
+                  'ta_gmail', 'ta_email'):
         value = course_data.get(field)
         if value and user_lower == value.lower():
             return True
 
     return False
+
+
+def _course_role(user_email: str, course_data: dict) -> str | None:
+    """Return 'admin', 'instructor', 'ta', or None for the user's role on a course."""
+    if not user_email:
+        return None
+    user_lower = user_email.lower()
+    if user_lower == config.admin_email:
+        return "admin"
+
+    instructor_fields = ('instructor_gmail', 'instructor_email', 'created_by')
+    ta_fields = ('ta_gmail', 'ta_email')
+
+    for field in instructor_fields:
+        value = course_data.get(field)
+        if value and user_lower == value.lower():
+            return "instructor"
+    for field in ta_fields:
+        value = course_data.get(field)
+        if value and user_lower == value.lower():
+            return "ta"
+    return None
+
+
+@app.get("/my_courses")
+async def my_courses(request: Request):
+    """List courses the current user can manage (instructor, TA, or admin).
+
+    Used by the instructor dashboard to populate the course picker so every
+    subsequent form is scoped to a course the user is authorized for.
+
+    Admins see every course in the cache. Instructors and TAs see only the
+    courses where their email matches one of the role fields.
+    """
+    user = get_current_user(request)
+    user_email = (user.get('email') or '').lower()
+    is_admin = user_email == config.admin_email
+
+    out = []
+    for course_handle, course_data in courses.items():
+        if is_admin:
+            role = "admin"
+        else:
+            role = _course_role(user_email, course_data)
+            if role is None:
+                continue
+        out.append({
+            "course_handle": course_handle,
+            "institution_id": course_data.get('institution_id'),
+            "term_id": course_data.get('term_id'),
+            "course_id": course_data.get('course_id'),
+            "course_name": course_data.get('course_name'),
+            "instructor_name": course_data.get('instructor_name'),
+            "role": role,
+        })
+    out.sort(key=lambda c: (c.get('institution_id') or '', c.get('term_id') or '',
+                            c.get('course_id') or ''))
+    return {"courses": out}
 
 
 def check_student_rate_limit(user_email: str, course_handle: str) -> None:
