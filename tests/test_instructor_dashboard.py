@@ -265,3 +265,16 @@ class TestDashboardServiceRegistry:
         resp = client.get("/", headers=_auth_header("admin@test.com"))
         assert "/my_courses" in resp.text
         assert "course-select" in resp.text
+
+    def test_includes_course_materials_link(self, client):
+        # Course materials use the existing drag-drop page; the dashboard
+        # surfaces it as a link so instructors can find it.
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        assert "/upload_course_materials" in resp.text
+        # Section header
+        assert "Course materials" in resp.text
+
+    def test_uses_colab_assignments_label(self, client):
+        # User-visible rename: "Notebook assignments" → "Colab assignments".
+        resp = client.get("/", headers=_auth_header("admin@test.com"))
+        assert "Colab assignments" in resp.text

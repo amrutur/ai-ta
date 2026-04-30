@@ -211,46 +211,42 @@ const SERVICES = [
     ],
   },
 
-  // --- Notebook Assignments ----------------------------------------------
+  // --- Colab Assignments --------------------------------------------------
   {
     id: 'nb_grade',
-    section: 'Notebook assignments',
-    label: 'Batch grade notebook',
-    desc: 'Grade all students (or one) for an existing notebook rubric. Streams progress.',
+    section: 'Colab assignments',
+    label: 'Batch grade Colab notebook',
+    desc: 'Grade all students (or one) for an existing Colab-notebook rubric. Streams progress.',
     method: 'POST', url: '/grade_notebook', encoding: 'json', streaming: true,
     fields: [
-      {name: 'notebook_id', label: 'Notebook ID', type: 'text', required: true},
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
       {name: 'student_id', label: 'Student email or "All"', type: 'text', required: true, value: 'All'},
       {name: 'do_regrade', label: 'Re-grade already-graded students', type: 'checkbox'},
     ],
   },
   {
     id: 'nb_regrade_q',
-    section: 'Notebook assignments',
+    section: 'Colab assignments',
     label: 'Regrade one question',
     desc: 'Re-grade a single question for one student, optionally including contention.',
     method: 'POST', url: '/regrade_answer', encoding: 'json',
     fields: [
-      {name: 'notebook_id', label: 'Notebook ID', type: 'text', required: true},
+      {name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true},
       {name: 'qnum', label: 'Question number', type: 'number', step: '1', required: true},
       {name: 'student_id', label: 'Student email', type: 'text', required: true},
       {name: 'student_contends', label: 'Student contention (optional)', type: 'textarea'},
       {name: 'do_regrade', label: 'Allow regrading even if already graded', type: 'checkbox', value: true},
     ],
   },
+
+  // --- Course materials (PDFs, slides, etc.) ------------------------------
   {
-    id: 'eval_enable',
-    section: 'Notebook assignments',
-    label: 'Enable eval (per notebook)',
-    method: 'POST', url: '/enable_eval', encoding: 'json',
-    fields: [{name: 'notebook_id', label: 'Notebook ID', type: 'text', required: true}],
-  },
-  {
-    id: 'eval_disable',
-    section: 'Notebook assignments',
-    label: 'Disable eval (per notebook)',
-    method: 'POST', url: '/disable_eval', encoding: 'json',
-    fields: [{name: 'notebook_id', label: 'Notebook ID', type: 'text', required: true}],
+    id: 'course_materials',
+    section: 'Course materials',
+    label: 'Upload course materials (drag-and-drop)',
+    desc: 'Open the dedicated drag-and-drop page for uploading PDFs / slides to this course\'s GCS folder. After uploading, run "Build RAG index" to make the materials retrievable by the agents.',
+    method: 'link', url: '/upload_course_materials',
+    fields: [],
   },
 
   // --- Grades -------------------------------------------------------------
@@ -300,6 +296,21 @@ const SERVICES = [
     label: 'Disable tutor (/assist)',
     method: 'POST', url: '/disable_tutor', encoding: 'json',
     fields: [],
+  },
+  {
+    id: 'eval_enable',
+    section: 'Course config',
+    label: 'Enable eval (per assignment)',
+    desc: 'Allow students to submit this assignment for grading. Works for both Colab and PDF assignments.',
+    method: 'POST', url: '/enable_eval', encoding: 'json',
+    fields: [{name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true}],
+  },
+  {
+    id: 'eval_disable',
+    section: 'Course config',
+    label: 'Disable eval (per assignment)',
+    method: 'POST', url: '/disable_eval', encoding: 'json',
+    fields: [{name: 'notebook_id', label: 'Assignment ID', type: 'text', required: true}],
   },
   {
     id: 'rate_limit_status',
@@ -444,6 +455,16 @@ function renderDashboard() {
 function renderForm(svc) {
   if (svc.method === null) {
     return `<div class="form-panel open"><div class="desc">${escapeHtml(svc.desc || '')}</div></div>`;
+  }
+  if (svc.method === 'link') {
+    // Plain navigation. Open in a new tab so the dashboard state is preserved.
+    return `<div class="form-panel open">
+      <div class="desc">${escapeHtml(svc.desc || '')}</div>
+      <a href="${escapeAttr(svc.url)}" target="_blank" rel="noopener"
+         style="display:inline-block;background:var(--accent);color:white;padding:8px 16px;border-radius:5px;text-decoration:none;font-size:13px;margin-top:8px;">
+         Open in new tab →
+      </a>
+    </div>`;
   }
   let html = `<div class="form-panel open"><form data-svc="${svc.id}">`;
   if (svc.desc) html += `<div class="desc">${escapeHtml(svc.desc)}</div>`;
