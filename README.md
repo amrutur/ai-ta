@@ -397,14 +397,14 @@ For each PDF in the folder the server:
 
 The response is `{ingested: [...], skipped: [...], failed: [...]}` so the instructor can spot any oversize / inaccessible files.
 
-**4. Grade** — `POST /grade_pdf_assignment` streams ndjson progress while running the scoring agent on every ingested PDF concurrently:
+**4. Grade** — `POST /grade_assignment` is the unified entry point and dispatches by `(assignment_type, submission_type)` to the right scorer (`grade_pdf_assignment` for `report + pdf` submissions, `grade_notebook` for `q&a + colab` notebooks). It streams ndjson progress while running the scoring agent on every ingested PDF concurrently:
 
 ```json
 { "institution_id": "iisc", "term_id": "2025-26", "course_id": "cp260",
   "notebook_id": "lab1", "do_regrade": false }
 ```
 
-The scoring agent receives the PDF as a multimodal Vertex AI input (via `gs://` URI), so figures, tables, and plots are considered alongside the rubric, problem statement, sample response, and RAG-retrieved course material. The grade is written to the per-PDF tracking doc and to every co-author's mirror doc — so `/fetch_marks_list`, `/fetch_grader_response`, and `/notify_student_grades` work unchanged.
+The scoring agent receives the student's PDF (and the rubric PDF, when one was supplied via `/upload_rubric_file` / `/upload_rubric_link`) as multimodal Vertex AI inputs (via `gs://` URIs), so figures, tables, and plots are considered alongside the rubric, problem statement, sample response, and RAG-retrieved course material. The grade is written to the per-PDF tracking doc and to every co-author's mirror doc — so `/fetch_marks_list`, `/fetch_grader_response`, and `/notify_student_grades` work unchanged.
 
 Idempotency: submissions with `graded_at >= drive_modified_time` are skipped unless `do_regrade=true`.
 
@@ -419,6 +419,14 @@ Idempotency: submissions with `graded_at >= drive_modified_time` are skipped unl
 ```
 
 The previous response and the contention text are appended to the prompt; the audit trail is preserved in the new `grader_response`.
+
+**Escape hatches when ingest doesn't go cleanly**
+
+- `POST /debug_drive_access` — diagnose whether the platform service account can actually read a Drive URL. Returns the underlying Drive HTTP status + reason on failure (e.g. `403 insufficientFilePermissions`) plus the SA email you need to share the folder/file with. Use this *before* an ingest if you hit a 502.
+- `POST /debug_pdf_authors` — run the same `pypdf + Gemini` author-extraction pipeline `/ingest_pdf_submissions` uses, but on a single Drive file. Returns the extracted text size + sample, the raw LLM response, and per-author roster matches — so you can see whether the PDF is image-only, the cover page format defeats extraction, or the names just don't match the roster.
+- `POST /upload_pdf_submission` (multipart) — upload a single PDF directly with explicit `student_ids`, bypassing Drive listing AND author extraction. Useful when Drive sharing is fiddly, the cover page format defeats extraction, or you just have a PDF on disk and the students' emails. The `drive_file_id` is `manual-{sha256[:16]}` so re-uploading the same PDF is idempotent (overwrites the same tracking doc).
+- `POST /reassign_pdf_submission` — when an ingested PDF ends up under an `@pending.local` placeholder student, this moves the grade onto the correct student emails. Auto-enrols any email not on the course; the agent is **not** re-invoked.
+- `POST /upload_student_roster` (multipart, CSV) — pre-populate `Students/{email}` with `name, email, roll_no?`. The fuzzy author matcher then resolves names → enrolled emails on ingest, avoiding placeholders altogether.
 
 **Limits & notes**
 - Maximum PDF size during ingest is 50 MB. Larger files are reported in `failed` rather than silently truncated.
@@ -458,32 +466,40 @@ The API supports two authentication methods:
 
 | Endpoint | Method | Request Model | Description |
 |----------|--------|---------------|-------------|
-| `/enable_tutor` | POST | `TutorInteractionRequest` | Enable the `/assist` endpoint for students |
-| `/disable_tutor` | POST | `TutorInteractionRequest` | Disable the `/assist` endpoint for students |
-| `/enable_eval` | POST | `TutorInteractionRequest` | Enable the `/eval` endpoint for students |
-| `/disable_eval` | POST | `TutorInteractionRequest` | Disable the `/eval` endpoint |
-| `/upload_rubric` | POST | `AddRubricRequest` | Upload rubric (questions, answers, marks, context) |
+| `/grade_assignment` | POST | `GradeAssignmentRequest` | Unified grading entry point — dispatches by `(assignment_type, submission_type)` to the PDF or Colab scorer |
+| `/grade_notebook` | POST | `GradeNotebookRequest` | Batch-grade a Colab notebook for one or all students (supports `do_regrade`); called internally by `/grade_assignment` for `q&a + colab` |
+| `/grade_pdf_assignment` | POST | `GradePdfAssignmentRequest` | Stream-grade every ingested PDF submission; called internally by `/grade_assignment` for `report + pdf` |
+| `/regrade_answer` | POST | `RegradeAnswerRequest` | Regrade a single question (Colab assignments) with optional student contention |
+| `/regrade_pdf_submission` | POST | `RegradePdfSubmissionRequest` | Regrade a single student's PDF submission, optionally with contention |
+| `/reassign_pdf_submission` | POST | `ReassignPdfSubmissionRequest` | Move a graded PDF off `@pending.local` placeholders onto real student emails (auto-enrols missing students; preserves the grade) |
 | `/fetch_marks_list` | POST | `FetchMarksListRequest` | Fetch all student marks for a notebook |
 | `/fetch_grader_response` | POST | `FetchGradedRequest` | Fetch grading feedback for a specific student |
-| `/grade_notebook` | POST | `GradeNotebookRequest` | Batch-grade a notebook for one or all students (supports `do_regrade`) |
-| `/regrade_answer` | POST | `RegradeAnswerRequest` | Regrade a single question with optional student contention |
+| `/download_marks` | GET | query | Download a CSV of marks for an assignment (`student_id, name, total_marks, max_marks`) |
+| `/download_grader_response` | GET | query | Download a JSON file of grader responses keyed by student email |
 | `/notify_student_grades` | POST | `NotifyGradedRequest` | Send grade notification email to a student |
+| `/upload_rubric` | POST | `AddRubricRequest` | Upload structured rubric JSON (Colab path; primarily used by the Colab client) |
+| `/upload_rubric_file` | POST | multipart | Upload a rubric file directly (PDF for `report + pdf` assignments) |
+| `/upload_rubric_link` | POST | JSON | Upload a rubric from a Drive share link (PDF mode) |
+| `/ingest_pdf_submissions` | POST | `IngestPdfSubmissionsRequest` | Ingest PDF reports from a shared Drive folder (idempotent on `drive_file_id` + `drive_modified_time`) |
+| `/upload_pdf_submission` | POST | multipart | Manual single-PDF upload with explicit `student_ids` — escape hatch for Drive / extraction issues |
+| `/upload_student_roster` | POST | multipart | Upload a CSV roster (`name, email, roll_no?`) so author extraction matches names to enrolled emails |
 | `/list_course_files` | POST | `ListCourseFilesRequest` | List files in a course's GCS storage folder |
 | `/upload_course_materials` | GET | — | Drag-and-drop file upload page for course PDFs |
 | `/validate_course_access` | GET | Query params | Validate instructor access to a course |
 | `/get_upload_url` | POST | JSON body | Generate signed GCS URL for direct browser upload |
 | `/upload_file` | POST | FormData | Upload a file directly to GCS (avoids CORS issues with signed URLs) |
 | `/build_course_index` | POST | `BuildCourseIndexRequest` | Build RAG vector index for course PDF materials |
-| `/update_course_config` | POST | `UpdateCourseConfigRequest` | Update course config (model, tutor/eval toggle, rate limits) |
+| `/enable_tutor` | POST | `TutorInteractionRequest` | Enable the `/assist` endpoint for students |
+| `/disable_tutor` | POST | `TutorInteractionRequest` | Disable the `/assist` endpoint for students |
+| `/enable_eval` | POST | `EvalToggleRequest` | Enable the `/eval` endpoint for an assignment |
+| `/disable_eval` | POST | `EvalToggleRequest` | Disable the `/eval` endpoint for an assignment |
+| `/update_course_config` | POST | `UpdateCourseConfigRequest` | Update course config (model, course_name, course_topics, tutor toggle, rate limits) |
 | `/rate_limit_status` | POST | `TutorInteractionRequest` | View per-student rate limit usage for a course |
-| `/ingest_pdf_submissions` | POST | `IngestPdfSubmissionsRequest` | Ingest PDF reports from a shared Drive folder for a PDF assignment |
-| `/grade_pdf_assignment` | POST | `GradePdfAssignmentRequest` | Stream-grade every ingested PDF submission for a notebook |
-| `/regrade_pdf_submission` | POST | `RegradePdfSubmissionRequest` | Regrade a single student's PDF submission, optionally with contention |
-| `/upload_rubric_file` | POST | multipart | Upload a rubric file directly (PDF for PDF assignments) |
-| `/upload_rubric_link` | POST | JSON | Upload a rubric from a Drive share link (PDF mode) |
-| `/my_courses` | GET | — | List the courses the current user can manage (instructor / TA / admin) |
 | `/update_course_prompt` | POST | `UpdateCoursePromptRequest` | Override / clear the prompt for one agent on this course |
 | `/course_prompt` | GET | query | View the effective prompt + default template for one agent on this course |
+| `/my_courses` | GET | — | List the courses the current user can manage (instructor / TA / admin) |
+| `/debug_drive_access` | POST | `DebugDriveAccessRequest` | Diagnose whether the SA can read a Drive URL; surfaces the underlying API error + SA email |
+| `/debug_pdf_authors` | POST | `DebugPdfAuthorsRequest` | Run the author-extraction pipeline on a single PDF and return text sample + LLM output + roster matches |
 
 ### Admin Endpoints (Requires Admin Authentication)
 
@@ -492,11 +508,13 @@ The API supports two authentication methods:
 | `/create_course` | POST | `CreateCourseRequest` | Create a new course on the platform |
 | `/update_global_config` | POST | `UpdateGlobalConfigRequest` | Update global server config (e.g., concurrency semaphore limit) |
 
-### Diagnostics
+### Diagnostics & UI
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Health check / admin login page |
+| `/` | GET | Instructor dashboard (single-page UI; redirects to `/login?next=/` if not signed in) |
+| `/admin` | GET | Platform-admin login page (sets the `admin_login` flag for the OAuth callback to gate `/docs`) |
+| `/docs` | GET | Auto-generated OpenAPI / Swagger docs (admin-gated) |
 | `/session-test` | GET | Test session configuration (development) |
 
 ## Configuration
@@ -536,7 +554,7 @@ Secrets are stored in Secret Manager and accessed by the server at startup:
 | `EMAIL_KEY` | Gmail app password for SMTP email delivery (optional) |
 | Gemini API key | Direct Gemini API access (optional) |
 
-See [GMAIL_SETUP.md](./GMAIL_SETUP.md) for email configuration details.
+See [docs/GMAIL_SETUP.md](./docs/GMAIL_SETUP.md) for email configuration details.
 
 ## Deployment
 
@@ -555,7 +573,7 @@ docker run -p 8080:8080 \
 
 ### Google Cloud Run
 
-For detailed deployment instructions, see [DEPLOYMENT.md](./DEPLOYMENT.md).
+For detailed deployment instructions, see [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md).
 
 Quick deployment:
 
@@ -592,36 +610,43 @@ ai-ta/
 │   ├── agent.py             # AI agent definitions (instructor, tutor, scoring)
 │   ├── agent_service.py     # Agent orchestration and scoring logic (notebook + PDF)
 │   ├── rate_limiter.py       # Per-student sliding-window rate limiter
-│   ├── rag.py               # RAG pipeline (PDF chunking, embedding, retrieval)
-│   ├── drive_utils.py       # Google Drive helpers (file + folder access via service account)
-│   ├── pdf_utils.py         # PDF text extraction, author detection, fuzzy student matching
-│   ├── storage_utils.py     # GCS upload and signed URL utilities
-│   ├── email_service.py     # Gmail SMTP email service
-│   ├── aita_exceptions.py   # Custom exception classes
-│   └── exceptions.py        # Base exception hierarchy
+│   ├── rag.py                       # RAG pipeline (PDF chunking, embedding, retrieval)
+│   ├── drive_utils.py               # Google Drive helpers (file + folder access via service account)
+│   ├── pdf_utils.py                 # PDF text extraction, author detection, fuzzy student matching, roster CSV parsing
+│   ├── storage_utils.py             # GCS upload and signed URL utilities
+│   ├── email_service.py             # Gmail SMTP email service
+│   ├── instructor_dashboard_html.py # Static HTML / JS for the dashboard at GET /
+│   ├── aita_exceptions.py           # Custom exception classes
+│   └── exceptions.py                # Base exception hierarchy
 ├── tests/
-│   ├── conftest.py              # Pytest configuration and shared fixtures
-│   ├── test_api_endpoints.py    # API integration tests
-│   ├── test_agent_service.py    # Agent execution tests
-│   ├── test_auth.py             # Auth logic tests
-│   ├── test_database.py         # Database operations tests
-│   ├── test_drive_utils.py      # Google Drive utility tests (file + folder access)
-│   ├── test_email_service.py    # Email service tests
-│   ├── test_exceptions.py       # Exception tests
-│   ├── test_firestore_service.py # Session service tests
-│   ├── test_models.py           # Pydantic model tests
-│   ├── test_pdf_database.py     # PDF-assignment database helper tests
-│   ├── test_pdf_endpoints.py    # PDF-assignment endpoint tests (ingest/grade/regrade)
-│   ├── test_pdf_utils.py        # PDF text + author extraction + student matching tests
-│   ├── test_rag.py              # RAG pipeline tests
-│   ├── test_rate_limiter.py     # Rate limiter tests
-│   └── test_storage_utils.py    # GCS utility tests
+│   ├── conftest.py                  # Pytest configuration and shared fixtures
+│   ├── test_api_endpoints.py        # API integration tests
+│   ├── test_agent_service.py        # Agent execution tests
+│   ├── test_auth.py                 # Auth logic tests
+│   ├── test_database.py             # Database operations tests
+│   ├── test_drive_utils.py          # Google Drive utility tests (incl. error-diagnostic helper)
+│   ├── test_email_service.py        # Email service tests
+│   ├── test_exceptions.py           # Exception tests
+│   ├── test_firestore_service.py    # Session service tests
+│   ├── test_instructor_dashboard.py # Dashboard routing, /my_courses, prompt management, type normalization
+│   ├── test_models.py               # Pydantic model tests
+│   ├── test_pdf_database.py         # PDF-assignment database helper tests
+│   ├── test_pdf_endpoints.py        # PDF-assignment endpoint tests (ingest, grade, regrade, reassign, debug, manual upload, roster, downloads)
+│   ├── test_pdf_utils.py            # PDF text + author extraction + roster CSV parsing tests
+│   ├── test_rag.py                  # RAG pipeline tests
+│   ├── test_rate_limiter.py         # Rate limiter tests
+│   └── test_storage_utils.py        # GCS utility tests
+├── docs/
+│   ├── DEPLOYMENT.md                # Cloud Run deployment guide
+│   ├── GMAIL_SETUP.md               # Gmail SMTP configuration guide
+│   └── future_features.md           # Deferred work + implementation sketches
+├── examples/                        # Example homework / quiz / lab Colab notebooks
 ├── requirements.txt
+├── requirements-dev.txt
 ├── Dockerfile
 ├── Makefile
-├── .env.example             # Environment variables template
-├── DEPLOYMENT.md            # Cloud Run deployment guide
-├── GMAIL_SETUP.md           # Email configuration guide
+├── pyproject.toml
+├── .env.example                     # Environment variables template
 └── README.md
 ```
 
@@ -651,7 +676,7 @@ The system includes a Retrieval-Augmented Generation pipeline for grounding agen
 - **Chunk size**: 1000 characters with 200-character overlap
 - **Storage**: Firestore native `Vector` type in `rag_chunks` subcollection
 - **Retrieval**: Cosine similarity search via Firestore `find_nearest()`
-- **Integration**: Retrieved context is injected into `/assist` and `/eval` agent prompts
+- **Integration**: Retrieved context is injected into `/assist`, `/eval`, and the PDF scoring paths (`/grade_pdf_assignment`, `/regrade_pdf_submission`) — anywhere the scoring or tutor agent runs against student work
 
 ### Testing & Code Quality
 
@@ -703,8 +728,9 @@ Logs are written to:
 
 ## Documentation
 
-- [Deployment Guide](./DEPLOYMENT.md) — Cloud Run deployment instructions
-- [Gmail SMTP Setup](./GMAIL_SETUP.md) — Email notification configuration
+- [Deployment Guide](./docs/DEPLOYMENT.md) — Cloud Run deployment instructions
+- [Gmail SMTP Setup](./docs/GMAIL_SETUP.md) — Email notification configuration
+- [Future Features](./docs/future_features.md) — deferred work (q&a + pdf grading, OCR for scanned PDFs, server-side rubric notebook parsing, placeholder auto-merge)
 
 ## Contributing
 
